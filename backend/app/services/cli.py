@@ -16,6 +16,16 @@ from .logger import get_logger, log_cli
 
 _PENDING_LOGINS: dict[str, dict] = {}
 
+# Valid values for `libationcli login-external --locale`. These are AudibleApi
+# `Locale.Name` values, NOT ISO country codes. `Localization.Get()` matches on
+# Name and silently returns `Locale.Empty` for anything unrecognised, which
+# yields a malformed sign-in URL (`https://www.amazon./ap/signin`) instead of an
+# error — so validate up front.
+VALID_LOCALES = frozenset({
+    "us", "uk", "germany", "france", "canada", "australia",
+    "japan", "italy", "spain", "india", "brazil",
+})
+
 
 def _cmd(*args: str) -> list[str]:
     return [settings.LIBATION_CLI, *args, "--libationFiles", settings.LIBATION_CONFIG]
@@ -110,6 +120,14 @@ async def list_accounts() -> list[dict]:
 async def start_login(email: str, locale: str) -> dict:
     """Start login-external via PTY. Kept in Python — PTY allocation is simpler here."""
     logger = get_logger()
+    locale = (locale or "").strip().lower()
+    if locale not in VALID_LOCALES:
+        logger.error("[login] Rejected unknown locale %r for %s", locale, email)
+        raise ValueError(
+            f"Unknown Audible marketplace {locale!r}. "
+            f"Expected one of: {', '.join(sorted(VALID_LOCALES))}."
+        )
+
     logger.info("[login] Starting login-external for %s (%s)", email, locale)
     t0 = time.monotonic()
     master_fd, slave_fd = pty.openpty()
@@ -123,9 +141,14 @@ async def start_login(email: str, locale: str) -> dict:
     os.close(slave_fd)
 
     try:
+        # The trailing \s matters. _read_fd_until re-tests this pattern after
+        # every read, so an unterminated pattern matches the moment the URL
+        # straddles a chunk boundary and returns a truncated link. LibationCli
+        # emits the URL with Console.WriteLine, so requiring the newline proves
+        # the whole URL has arrived.
         output = await _read_fd_until(
             master_fd,
-            pattern=r"https://www\.amazon\.[^\s]+",
+            pattern=r"https://www\.amazon\.\S+\s",
             timeout=30,
         )
     except asyncio.TimeoutError:
@@ -150,6 +173,35 @@ async def start_login(email: str, locale: str) -> dict:
         )
 
     login_url = match.group(0).rstrip(".")
+
+    # Never hand back a URL that cannot work. Two distinct failure modes:
+    problem: str | None = None
+
+    # 1. `Locale.Empty` renders an empty top-level domain, e.g.
+    #    "https://www.amazon./ap/signin?...".
+    if re.match(r"https://www\.amazon\.(?:[/?]|$)", login_url):
+        problem = (
+            f"empty Amazon domain — marketplace {locale!r} was not recognised by LibationCli"
+        )
+    else:
+        # 2. A short read. Both parameters are always present in a complete
+        #    sign-in URL, so either one missing means the URL was cut off.
+        missing = [
+            p for p in ("openid.assoc_handle=", "openid.oa2.code_challenge=")
+            if p not in login_url
+        ]
+        if missing:
+            problem = f"truncated login URL, missing {' and '.join(missing)}"
+
+    if problem:
+        proc.kill()
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        logger.error("[login] Malformed login URL for locale %r: %s — %s", locale, problem, login_url)
+        raise RuntimeError(f"LibationCli produced a malformed login URL: {problem}.")
+
     logger.info("[login] Login URL generated for %s (%.1fs) — waiting for user response", email, time.monotonic() - t0)
     session_id = str(uuid.uuid4())
     _PENDING_LOGINS[session_id] = {
