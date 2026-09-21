@@ -203,7 +203,16 @@ static class LibationBridgeApp
                             info.Progress = (int)(e.ProgressPercentage ?? 0);
                     };
 
-                    await processor.ProcessAsync(book);
+                    // ProcessAsync reports failures in its RETURN value, not by throwing — a book that
+                    // downloaded but never reached the Books folder came back here as "complete".
+                    var status = await processor.ProcessAsync(book);
+                    if (status is null || !status.IsSuccess)
+                    {
+                        var errors = status is null
+                            ? "ProcessAsync returned no status"
+                            : string.Join("; ", status.Errors);
+                        throw new InvalidOperationException($"Liberate failed: {errors}");
+                    }
 
                     progress[asin] = new ProgressInfo
                     {

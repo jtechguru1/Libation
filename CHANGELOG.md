@@ -16,6 +16,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   LibationBridge sidecar compiled unchanged against the v14 DLLs.
   ⚠ **Updating alone is not enough** — the old device registration stays broken until the account
   is removed and re-added. Use the new Re-authenticate button below.
+- **A download could finish, then silently vanish before reaching the Books folder — and still
+  show as complete.** Two defects. (1) Libation deletes everything in its `DecryptInProgress` temp
+  folder every time `libationcli` starts, and the web app starts `libationcli list-accounts` on a
+  timer; with one shared `/tmp`, a poll landing inside the ~50-second decrypt window deleted the
+  half-written M4B out from under LibationBridge. The bridge now runs with its own `TMPDIR`
+  (`/tmp/libation-bridge`), so the CLI's startup cleanup only touches the CLI's own files.
+  (2) LibationBridge ignored the status that `ProcessAsync` returns — upstream reports most
+  failures there rather than by throwing — so a book that never reached the Books folder was
+  reported as "complete". The bridge now reports those failures as errors with the message.
+  Present since the first LibationBridge build; not specific to Libation 14.
+- **The Accounts page crashed** ("Something went wrong", React error #31) when the automatic scan
+  after adding or re-authenticating an account was refused by the 10-minute scan guard. The
+  guard's reply is an object, and the page rendered it as text. It now shows the guard's message.
 - **The Audible login URL could arrive truncated** (Amazon showed "not a functioning page"). The
   v14 login URL is ~940 characters and the backend returned it as soon as its *start* appeared in
   the CLI output; it now waits for the end of the line.

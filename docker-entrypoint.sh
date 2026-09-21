@@ -92,10 +92,18 @@ while true; do
     echo '{"LibationFiles":"/config"}' > /config/Libation/appsettings.json
 
     # ── Start LibationBridge ──────────────────────────────────────────────────
+    # The bridge gets its own temp tree. Libation puts DownloadsInProgress/DecryptInProgress under
+    # $TMPDIR/Libation-<user>, and EVERY libationcli start deletes everything in DecryptInProgress
+    # ("clean up partially-decrypted files from previous instances"). The backend runs libationcli
+    # on a timer (list-accounts), so with a shared /tmp a poll landing inside the ~50 s decrypt
+    # window deleted the half-written M4B and the book silently never reached the Books folder.
+    BRIDGE_TMP=/tmp/libation-bridge
+    mkdir -p "$BRIDGE_TMP"
+    [ "$USE_GOSU" = true ] && chown libation:libation "$BRIDGE_TMP"
     if [ "$USE_GOSU" = true ]; then
-        HOME=/home/libation gosu libation /usr/local/bin/libation-bridge &
+        HOME=/home/libation TMPDIR="$BRIDGE_TMP" gosu libation /usr/local/bin/libation-bridge &
     else
-        HOME=/home/libation /usr/local/bin/libation-bridge &
+        HOME=/home/libation TMPDIR="$BRIDGE_TMP" /usr/local/bin/libation-bridge &
     fi
     BRIDGE_PID=$!
 
