@@ -228,7 +228,9 @@ export function MyBooksPage() {
             {debouncedSearch ? `No results for "${debouncedSearch}"` : "No books found"}
           </h2>
           <p className="text-sm text-slate-400 max-w-xs">
-            {debouncedSearch ? "Try a different search." : "Run a library scan to populate your books."}
+            {debouncedSearch
+              ? "Try a different search."
+              : "Books appear after a library scan. Scans run automatically on the schedule set in Settings."}
           </p>
         </div>
       ) : viewMode === "grid" ? (

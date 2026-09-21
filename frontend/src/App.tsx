@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { api } from "@/lib/api";
+import { OnboardingPage } from "@/pages/OnboardingPage";
 import { ThemeProvider } from "@/context/ThemeContext";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Layout } from "@/components/layout/Layout";
@@ -28,13 +31,52 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated ? <Navigate to="/" replace /> : <>{children}</>;
 }
 
+/**
+ * A signed-in user still on the seeded `admin` / `admin` credentials is sent straight to onboarding,
+ * ahead of every other route.
+ *
+ * Previously the only signal was an amber banner inside Settings — a page a brand-new user has no
+ * particular reason to open — so a fresh install could run indefinitely on factory credentials with
+ * nothing insisting otherwise. Securing the account is now the first thing that happens.
+ *
+ * Fails OPEN: if the check itself errors, the app loads normally. A network blip must not lock
+ * someone out of their own library.
+ */
+function OnboardingGate({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated } = useAuth();
+  const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!isAuthenticated) { setNeedsOnboarding(null); return; }
+    let cancelled = false;
+    api.get("/auth/default-credentials")
+      .then(r => { if (!cancelled) setNeedsOnboarding(Boolean(r.data?.using_default_credentials)); })
+      .catch(() => { if (!cancelled) setNeedsOnboarding(false); })
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
+
+  if (isAuthenticated && needsOnboarding === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="h-8 w-8 rounded-full border-4 border-brand-600 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
+  if (isAuthenticated && needsOnboarding) {
+    return <OnboardingPage onDone={() => setNeedsOnboarding(false)} />;
+  }
+
+  return <>{children}</>;
+}
+
 function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
       <Route path="/auth/2fa" element={<PublicRoute><TwoFactorPage /></PublicRoute>} />
 
-      <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+      <Route element={<ProtectedRoute><OnboardingGate><Layout /></OnboardingGate></ProtectedRoute>}>
         <Route path="/" element={<Navigate to="/liberate" replace />} />
         <Route path="/liberate" element={<LiberatePage />} />
         <Route path="/downloads" element={<DownloadsPage />} />

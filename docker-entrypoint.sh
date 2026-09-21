@@ -4,6 +4,23 @@ set -e
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
+# ── Timezone ──────────────────────────────────────────────────────────────────
+# Without this the container is pinned to UTC, so every log line and on-screen time is written in
+# UTC with nothing saying so. An operator in CST reading "02:39:47" reasonably concludes the clock
+# is wrong or that hours have gone by. TZ is the knob every Unraid container is expected to expose.
+if [ -n "$TZ" ]; then
+    if [ -f "/usr/share/zoneinfo/$TZ" ]; then
+        ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime
+        echo "$TZ" > /etc/timezone
+        echo "[Libation] Timezone set to $TZ ($(date '+%Y-%m-%d %H:%M:%S %Z %z'))"
+    else
+        echo "[Libation] WARNING: TZ='$TZ' is not a known timezone; staying on UTC."
+        echo "[Libation]          Expected a value like 'America/Chicago' or 'Europe/London'."
+    fi
+else
+    echo "[Libation] TZ not set - using UTC. Set TZ (e.g. America/Chicago) for local timestamps."
+fi
+
 # ── Wait for LibationBridge /health to respond ────────────────────────────────
 wait_for_bridge() {
     echo "[Libation] Waiting for LibationBridge to be ready..."

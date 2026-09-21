@@ -1,10 +1,14 @@
 import json
 import os
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ..database import get_db
+from ..services import automation as automation_svc
 from ..schemas.settings import LibationSettings, AppStats, DownloadsPerUser
 from ..schemas.auth import MessageResponse
 from ..models.download import Download
@@ -71,6 +75,39 @@ def update_libation_settings(body: LibationSettings, _=Depends(get_current_user)
             raw[keys[0]] = value
     _write_raw(raw)
     return _parse_settings(raw)
+
+
+# ── Automation: scheduled scans + download pacing ─────────────────────────────
+
+class AutomationSettings(BaseModel):
+    """How often the library is re-scanned, and how long to wait between downloads."""
+    scan_interval_minutes: Optional[int] = None
+    download_delay_seconds: Optional[int] = None
+
+
+def _require_admin(user) -> None:
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Admin access required")
+
+
+@router.get("/automation")
+def get_automation(current_user=Depends(get_current_user)):
+    _require_admin(current_user)
+    return automation_svc.get_automation_settings()
+
+
+@router.put("/automation")
+def update_automation(body: AutomationSettings, current_user=Depends(get_current_user)):
+    _require_admin(current_user)
+    try:
+        return automation_svc.update_automation_settings(
+            scan_interval_minutes=body.scan_interval_minutes,
+            download_delay_seconds=body.download_delay_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=str(exc))
 
 
 @router.get("/stats", response_model=AppStats)

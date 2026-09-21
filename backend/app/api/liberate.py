@@ -124,40 +124,38 @@ def list_liberate_books(
     return result
 
 
-async def _run_liberate_all(scan_id: int) -> None:
-    with SessionLocal() as db:
-        scan = db.get(Scan, scan_id)
-        if scan:
-            scan.started_at = datetime.now(timezone.utc)
-            db.commit()
-    try:
-        exit_code, output = await cli_svc.run_liberate()
-    except Exception as e:
-        exit_code, output = 1, str(e)
-
-    books_added = 0
-    m = re.search(r"(\d+)\s+book", output, re.IGNORECASE)
-    if m:
-        books_added = int(m.group(1))
-
-    with SessionLocal() as db:
-        scan = db.get(Scan, scan_id)
-        if scan:
-            scan.status = "complete" if exit_code == 0 else "error"
-            scan.completed_at = datetime.now(timezone.utc)
-            scan.books_added = books_added
-            scan.output = output[:4000]
-            if exit_code != 0:
-                scan.error_message = output[-500:]
-            db.commit()
+class BulkQueueResponse(BaseModel):
+    """Result of a bulk enqueue — what the UI reports back to the user."""
+    queued: int
+    skipped: int
+    total: int
 
 
-@router.post("/download-all", response_model=ScanResponse, status_code=202)
-def download_all(
+@router.post("/download-all", response_model=BulkQueueResponse, status_code=202)
+async def download_all(
+    account_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Download every unliberated book. Only available when user has no download cap."""
+    """Queue every not-yet-downloaded book. Only available when the user has no download cap.
+
+    Two things changed here and both matter:
+
+    1. This used to be `def`, not `async def`. FastAPI runs sync handlers in a worker thread with no
+       running event loop, so the `asyncio.create_task(...)` it ended with raised
+       `RuntimeError: no running event loop` — a 500 on *every* call, for every user including
+       admin. That is the "Failed to start bulk download" the UI reported.
+
+    2. It used to shell out to `libationcli liberate --force`, which downloads books concurrently
+       under its own control. Audible is liable to flag an account downloading in bulk
+       simultaneously, so bulk now enqueues into the same serial queue everything else uses and the
+       worker drains it one book at a time.
+
+    Already-downloaded books are never enqueued: the filter is `not_liberated`, and the CLI would
+    not re-download them anyway.
+    """
+    from .downloads import enqueue_book
+
     _require_permission("can_liberate", current_user)
 
     if not current_user.is_admin and current_user.download_cap is not None:
@@ -166,10 +164,16 @@ def download_all(
             detail="Download cap is set on your account. Use individual downloads.",
         )
 
-    # Reuse Scan model to track bulk liberate progress
-    scan = Scan(status="running", started_at=datetime.now(timezone.utc))
-    db.add(scan)
-    db.commit()
-    db.refresh(scan)
-    asyncio.create_task(_run_liberate_all(scan.id))
-    return scan
+    book_ids = lib_svc.get_liberate_book_ids(
+        filter_status="not_liberated",
+        account_id=account_id or None,
+    )
+    if not book_ids:
+        return BulkQueueResponse(queued=0, skipped=0, total=0)
+
+    queued = sum(1 for book_id in book_ids if enqueue_book(book_id, current_user.id))
+    return BulkQueueResponse(
+        queued=queued,
+        skipped=len(book_ids) - queued,
+        total=len(book_ids),
+    )

@@ -91,10 +91,19 @@ def update_user(
         if len(body.new_password) < 8:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Password must be at least 8 characters")
         user.hashed_password = hash_password(body.new_password)
-    if body.owner_name is not None:
-        user.owner_name = body.owner_name.strip() or None
-    if body.audible_account_id is not None:
-        user.audible_account_id = body.audible_account_id.strip() or None
+    # `model_fields_set` holds the keys the client actually sent, which is the only way to tell an
+    # explicit null from an omitted field.
+    #
+    # These two used to be guarded by `is not None`, so sending `audible_account_id: null` — exactly
+    # what the "Unassigned" option sends — was indistinguishable from not sending the field, and the
+    # update was skipped. The UI showed the change and it silently reverted on reload, meaning an
+    # Audible account could be assigned to a user but never UNassigned. Both the Accounts page owner
+    # dropdown and the Settings → User Management one were affected.
+    provided = body.model_fields_set
+    if "owner_name" in provided:
+        user.owner_name = (body.owner_name or "").strip() or None
+    if "audible_account_id" in provided:
+        user.audible_account_id = (body.audible_account_id or "").strip() or None
     db.commit()
     db.refresh(user)
     return user

@@ -462,6 +462,143 @@ const LIBATION_TOGGLES: { key: keyof LibationSettingsData; label: string; desc: 
   { key: "strip_unabridged", label: 'Strip "Unabridged" from titles', desc: 'Remove the word "Unabridged" from file names' },
 ];
 
+// ── Automation: scheduled scans + download pacing ────────────────────────────
+
+const SCAN_INTERVAL_LABELS: Record<number, string> = {
+  0: "Off — never scan automatically",
+  15: "Every 15 minutes",
+  30: "Every 30 minutes",
+  60: "Every hour",
+  180: "Every 3 hours",
+  360: "Every 6 hours",
+  720: "Every 12 hours",
+  1440: "Once a day",
+};
+
+const DOWNLOAD_DELAY_LABELS: Record<number, string> = {
+  0: "No pause — start the next book immediately",
+  15: "15 seconds",
+  30: "30 seconds",
+  60: "1 minute",
+  300: "5 minutes",
+};
+
+interface AutomationData {
+  scan_interval_minutes: number;
+  download_delay_seconds: number;
+  scan_interval_choices: number[];
+  download_delay_choices: number[];
+}
+
+function AutomationSection() {
+  const [data, setData] = useState<AutomationData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    settingsApi.getAutomation()
+      .then(r => setData(r.data))
+      .catch(() => setError("Could not load automation settings."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const save = async (patch: Partial<AutomationData>) => {
+    if (!data) return;
+    const previous = data;
+    setData({ ...data, ...patch });
+    setSaving(true); setError(""); setSuccess("");
+    try {
+      const { data: saved } = await settingsApi.updateAutomation(patch as Record<string, unknown>);
+      setData(saved);
+      setSuccess("Saved.");
+      setTimeout(() => setSuccess(""), 3000);
+    } catch {
+      setData(previous);   // don't leave the UI showing a value the server rejected
+      setError("Failed to save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Card>
+        <CardContent className="py-8 flex justify-center">
+          <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <RefreshCw className="h-5 w-5 text-brand-600" />
+          Automation
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {error && <Alert variant="error">{error}</Alert>}
+        {success && <Alert variant="success">{success}</Alert>}
+
+        <div>
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+            Scan library automatically
+          </label>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 mb-2">
+            How often every connected Audible account is checked for new books. Accounts with
+            auto-download switched on will have any new books queued after each scan.
+          </p>
+          <select
+            value={data?.scan_interval_minutes ?? 360}
+            disabled={saving}
+            onChange={e => save({ scan_interval_minutes: Number(e.target.value) })}
+            className="w-full max-w-sm rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
+          >
+            {(data?.scan_interval_choices ?? []).map(v => (
+              <option key={v} value={v}>{SCAN_INTERVAL_LABELS[v] ?? `${v} minutes`}</option>
+            ))}
+          </select>
+          {/* Not hypothetical: repeated scans of a ~680-title library got a real account
+              rate-limited by Audible, after which every download failed — including books the
+              customer owned outright. */}
+          {data && data.scan_interval_minutes > 0 && data.scan_interval_minutes < 180 && (
+            <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
+              ⚠ Every scan queries Audible for your whole library. Scanning this often can get your
+              Audible account rate-limited, which makes downloads fail until it clears. Consider
+              6 hours or more unless you have a small library.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+            Pause between downloads
+          </label>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 mb-2">
+            Books always download one at a time. This is the wait before the next one starts —
+            a gap makes the pattern look less automated to Audible.
+          </p>
+          <select
+            value={data?.download_delay_seconds ?? 30}
+            disabled={saving}
+            onChange={e => save({ download_delay_seconds: Number(e.target.value) })}
+            className="w-full max-w-sm rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-50"
+          >
+            {(data?.download_delay_choices ?? []).map(v => (
+              <option key={v} value={v}>{DOWNLOAD_DELAY_LABELS[v] ?? `${v} seconds`}</option>
+            ))}
+          </select>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+
 function LibationSettingsSection() {
   const [data, setData] = useState<LibationSettingsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -472,7 +609,7 @@ function LibationSettingsSection() {
   useEffect(() => {
     settingsApi.getLibation()
       .then(r => setData(r.data))
-      .catch(() => setError("Could not load settings. Connect an Audible account and scan first."))
+      .catch(() => setError("Could not load settings. Connect an Audible account first — its library is scanned automatically once added."))
       .finally(() => setLoading(false));
   }, []);
 
@@ -1161,6 +1298,7 @@ export function SettingsPage() {
         </div>
       )}
       {usingDefaults && <UpdateCredentialsSection />}
+      {user?.is_admin && <AutomationSection />}
       {user?.is_admin && <LibationSettingsSection />}
       {user?.is_admin && <UserManagementSection />}
       {user?.is_admin && <UserPermissionsSection />}

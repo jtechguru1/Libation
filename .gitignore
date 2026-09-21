@@ -24,3 +24,6 @@ Thumbs.db
 
 # Claude Code tooling
 .omc/
+
+# graphify code-trace output
+graphify-out/

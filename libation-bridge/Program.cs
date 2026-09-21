@@ -42,7 +42,6 @@ static class LibationBridgeApp
 
         // ── Step 2: In-memory state ────────────────────────────────────────────
         var progress = new ConcurrentDictionary<string, ProgressInfo>();
-        var downloadAllRunning = 0; // 0 = idle, 1 = running (Interlocked)
 
         // Background: remove completed progress entries after 1 hour
         _ = Task.Run(async () =>
@@ -127,19 +126,32 @@ static class LibationBridgeApp
             return Results.Ok(accounts);
         });
 
-        // POST /scan — synchronous: holds connection open until libationcli scan exits
-        app.MapPost("/scan", async () =>
+        // POST /scan[?account=<id>] — synchronous: holds connection open until libationcli exits.
+        // `libationcli scan` takes optional POSITIONAL account IDs; with none it scans every
+        // account, which stays the default when the query param is absent.
+        app.MapPost("/scan", async (string? account) =>
         {
             var lockPath = "/config/SearchEngine/write.lock";
             if (File.Exists(lockPath))
                 try { File.Delete(lockPath); } catch { /* ignore */ }
+
+            // Guard the positional argument: an account id with whitespace or a leading dash would
+            // otherwise be parsed as a flag, or split into extra arguments.
+            var accountArg = "";
+            if (!string.IsNullOrWhiteSpace(account))
+            {
+                var trimmed = account.Trim();
+                if (trimmed.StartsWith("-") || trimmed.Any(char.IsWhiteSpace))
+                    return Results.BadRequest(new { error = "invalid account id" });
+                accountArg = trimmed + " ";
+            }
 
             using var proc = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "/usr/bin/libationcli",
-                    Arguments = "scan --libationFiles /config",
+                    Arguments = $"scan {accountArg}--libationFiles /config",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -220,39 +232,14 @@ static class LibationBridgeApp
                 ? Results.Ok(new { asin, progress = info.Progress, status = info.Status, output = info.Output ?? "" })
                 : Results.NotFound(new { error = "not found" }));
 
-        // POST /download-all — fires libationcli liberate with no args, returns 202
-        app.MapPost("/download-all", async () =>
-        {
-            if (Interlocked.CompareExchange(ref downloadAllRunning, 1, 0) != 0)
-                return Results.Conflict(new { error = "already in progress" });
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    using var proc = new Process
-                    {
-                        StartInfo = new ProcessStartInfo
-                        {
-                            FileName = "/usr/bin/libationcli",
-                            Arguments = "liberate --force --libationFiles /config",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            UseShellExecute = false,
-                        }
-                    };
-                    proc.StartInfo.EnvironmentVariables["HOME"] = "/home/libation";
-                    proc.Start();
-                    await proc.WaitForExitAsync();
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref downloadAllRunning, 0);
-                }
-            });
-
-            return Results.Accepted("/download-all", new { status = "started" });
-        });
+        // POST /download-all was removed. It ran `libationcli liberate --force`, which downloads
+        // books concurrently under its own control — the opposite of the one-at-a-time behaviour
+        // the web UI now enforces. Bulk downloads are enqueued book-by-book into the app's serial
+        // download queue and arrive here as individual POST /download/{asin} calls.
+        //
+        // It also carried a latent wedge: it set RedirectStandardOutput but never read the pipe, so
+        // a chatty CLI could fill the buffer and block forever, leaving its "already running" flag
+        // stuck at 1 and permanently 409-ing every later call.
 
         app.Run();
     }

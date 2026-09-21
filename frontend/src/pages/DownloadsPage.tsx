@@ -70,6 +70,9 @@ export function DownloadsPage() {
   const [scanVisible, setScanVisible] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState("");
+  const [scanCooldown, setScanCooldown] = useState<{
+    message: string; minutes_ago: number; cooldown_minutes: number;
+  } | null>(null);
   const [loadingDownloads, setLoadingDownloads] = useState(true);
 
   const fetchDownloads = useCallback(() => {
@@ -116,16 +119,27 @@ export function DownloadsPage() {
     return () => clearInterval(interval);
   }, [downloads, scan, fetchDownloads, fetchScan]);
 
-  const handleScan = async () => {
+  // `force` skips the back-to-back scan guard. Only ever set from the explicit "Scan anyway"
+  // button, never automatically — the whole point is that the risky path requires a decision.
+  const handleScan = async (force = false) => {
     setScanning(true);
     setScanError("");
+    setScanCooldown(null);
     setScanVisible(true);
     try {
-      const { data } = await api.post("/downloads/scan");
+      const { data } = await api.post("/downloads/scan", null, {
+        params: force ? { force: true } : undefined,
+      });
       setScan(data);
     } catch (e: any) {
-      setScanError(e.response?.data?.detail || "Scan failed to start");
-      fetchScan(true);
+      const detail = e.response?.data?.detail;
+      if (e.response?.status === 429 && detail && typeof detail === "object") {
+        // Not an error — a deliberate check the user can override.
+        setScanCooldown(detail);
+      } else {
+        setScanError(typeof detail === "string" ? detail : "Scan failed to start");
+        fetchScan(true);
+      }
     } finally {
       setScanning(false);
     }
@@ -140,9 +154,19 @@ export function DownloadsPage() {
     }
   };
 
+  // Downloads run strictly one at a time, so "active" is no longer one undifferentiated pile:
+  // exactly one book is downloading and the rest are waiting their turn. Lumping them together
+  // showed a queue of rows all sitting at 0%, which reads as stalled rather than as a queue.
   const active = downloads.filter(d => d.status === "queued" || d.status === "running");
+  const running = downloads.filter(d => d.status === "running");
+  // Oldest first — the same order the backend worker drains them in, so positions match reality.
+  const waiting = downloads
+    .filter(d => d.status === "queued")
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   const completed = downloads.filter(d => d.status === "complete");
   const failed = downloads.filter(d => d.status === "error");
+
+  const queuePosition = (id: number) => waiting.findIndex(d => d.id === id) + 1;
 
   return (
     <div className="max-w-[46rem] space-y-6">
@@ -155,7 +179,7 @@ export function DownloadsPage() {
           </p>
         </div>
         <button
-          onClick={handleScan}
+          onClick={() => handleScan()}
           disabled={scanning || scan?.status === "running"}
           className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
         >
@@ -195,6 +219,39 @@ export function DownloadsPage() {
           </div>
         </div>
       )}
+      {/* Back-to-back scan guard. Amber, not red — nothing has gone wrong, we are asking whether
+          they meant it. The override is a real button because there are legitimate reasons to
+          rescan immediately; it just must not be what happens by accident. */}
+      {scanCooldown && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40 px-4 py-3">
+          <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+              Scanned {scanCooldown.minutes_ago} minute{scanCooldown.minutes_ago === 1 ? "" : "s"} ago — scan again?
+            </p>
+            <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+              Every scan asks Audible for your whole library. Scanning repeatedly can get your
+              Audible account rate-limited, and while that lasts downloads fail even for books you
+              own. New purchases are picked up automatically on the schedule in Settings.
+            </p>
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                onClick={() => { setScanCooldown(null); handleScan(true); }}
+                className="rounded-lg border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-800 px-3 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-slate-700 transition-colors"
+              >
+                Scan anyway
+              </button>
+              <button
+                onClick={() => setScanCooldown(null)}
+                className="text-xs text-amber-700 dark:text-amber-400 underline"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {scanError && (
         <p className="text-sm text-red-600">{scanError}</p>
       )}
@@ -202,7 +259,13 @@ export function DownloadsPage() {
       {/* Active downloads */}
       {active.length > 0 && (
         <section>
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">Active ({active.length})</h2>
+          <h2 className="text-sm font-semibold text-slate-700 mb-2">
+            {running.length > 0 ? "Downloading" : "Queued"}
+            {waiting.length > 0 && ` — ${waiting.length} waiting`}
+          </h2>
+          <p className="text-xs text-slate-500 mb-2">
+            Books download one at a time to avoid Audible flagging the account for bulk activity.
+          </p>
           <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
             {active.map(dl => (
               <div key={dl.id} className="px-4 py-[2.26875rem]">
@@ -213,7 +276,11 @@ export function DownloadsPage() {
                     <p className="text-sm font-medium text-slate-900 truncate">
                       {dl.book_title || dl.book_id}
                     </p>
-                    <p className="text-xs text-slate-400 capitalize">{dl.status}</p>
+                    <p className="text-xs text-slate-400">
+                      {dl.status === "running"
+                        ? "Downloading now"
+                        : `Waiting — #${queuePosition(dl.id)} in queue`}
+                    </p>
                   </div>
                   <span className="text-xs font-medium text-brand-600 tabular-nums shrink-0">
                     {dl.progress}%
@@ -296,7 +363,8 @@ export function DownloadsPage() {
           </div>
           <p className="text-sm font-medium text-slate-600">No downloads yet</p>
           <p className="text-xs text-slate-400 mt-1">
-            Click a book in the Library to queue it for download.
+            Queue a book from the Liberate page, or turn on auto-download for an Audible account and
+            new books will be queued for you after each library scan.
           </p>
         </div>
       )}

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -70,6 +71,13 @@ def _migrate_db(db: Session) -> None:
     conn.execute(text(
         "INSERT OR IGNORE INTO system_settings (key, value) VALUES ('last_auto_download_at', '')"
     ))
+    # Automation defaults: how often the library is re-scanned, and the pause between downloads.
+    conn.execute(text(
+        "INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scan_interval_minutes', '360')"
+    ))
+    conn.execute(text(
+        "INSERT OR IGNORE INTO system_settings (key, value) VALUES ('download_delay_seconds', '30')"
+    ))
     db.commit()
 
 
@@ -78,6 +86,23 @@ def _seed_admin(db: Session) -> None:
     # interactions with the dangling connection that _migrate_db may leave open.
     try:
         conn = db.connection()
+
+        # 🔴 Seed ONLY when the users table is empty.
+        #
+        # This used to look for a user *named* ADMIN_USERNAME and create one if absent. Renaming the
+        # admin account — which the onboarding flow actively tells every new operator to do — left no
+        # row matching "admin", so a brand-new `admin` / `admin` account with full admin rights was
+        # silently recreated on EVERY container restart. Observed live: an operator renamed their
+        # account, restarted, and a default-credential admin reappeared alongside it.
+        #
+        # "if no users exist" is what the docs always claimed this did; now it is what it does.
+        user_count = conn.execute(text("SELECT COUNT(*) FROM users")).scalar() or 0
+        if user_count > 0:
+            get_logger().info(
+                "[startup] %d user(s) already exist - skipping admin seed", user_count
+            )
+            return
+
         row = conn.execute(
             text("SELECT id FROM users WHERE username = :u"),
             {"u": settings.ADMIN_USERNAME},
@@ -124,19 +149,38 @@ async def lifespan(app: FastAPI):
                 s.error_message = "Interrupted by server restart"
             db.commit()
             print(f"[Libation] Reset {len(stuck_scans)} stuck scan(s) to error")
-        stuck_downloads = db.query(Download).filter(
-            Download.status.in_(["queued", "running"])
-        ).all()
-        if stuck_downloads:
-            for d in stuck_downloads:
-                d.status = "error"
-                d.completed_at = now
-                d.error_message = "Interrupted by server restart"
+        # A download that was mid-flight when the container stopped goes back to the queue rather
+        # than to error: it never finished, and the worker will simply pick it up again. Rows that
+        # were merely QUEUED are left alone — previously both states were flipped to error, which
+        # meant restarting the container part-way through a bulk queue silently discarded the rest
+        # of the batch.
+        interrupted = db.query(Download).filter(Download.status == "running").all()
+        if interrupted:
+            for d in interrupted:
+                d.status = "queued"
+                d.progress = 0
+                d.started_at = None
             db.commit()
-            print(f"[Libation] Reset {len(stuck_downloads)} stuck download(s) to error")
-            logger.warning("[startup] Reset %d stuck download(s) to error (server was restarted)", len(stuck_downloads))
+            print(f"[Libation] Requeued {len(interrupted)} interrupted download(s)")
+            logger.warning("[startup] Requeued %d interrupted download(s) after restart",
+                           len(interrupted))
+        still_queued = db.query(Download).filter(Download.status == "queued").count()
+        if still_queued:
+            logger.info("[startup] %d download(s) waiting in the queue", still_queued)
+
+    # One worker drains the download queue serially; one scheduler runs periodic library scans.
+    # Both are started exactly once, here, and cancelled on shutdown.
+    worker_task = asyncio.create_task(downloads_router._download_worker())
+    scheduler_task = asyncio.create_task(downloads_router._scan_scheduler())
+
     logger.info("[startup] Ready")
-    yield
+    try:
+        yield
+    finally:
+        for task in (worker_task, scheduler_task):
+            task.cancel()
+        await asyncio.gather(worker_task, scheduler_task, return_exceptions=True)
+        logger.info("[shutdown] Background tasks stopped")
 
 
 app = FastAPI(title="Libation API", version="0.4.0", lifespan=lifespan)

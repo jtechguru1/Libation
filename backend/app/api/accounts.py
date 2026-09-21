@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,12 @@ from ..services import cli
 from ..config import settings
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+
+
+class AccountAddedResponse(BaseModel):
+    """Login result. `account_id` is the newly-added account, so the UI can scan just that one."""
+    message: str
+    account_id: Optional[str] = None
 
 
 @router.get("", response_model=list[AccountResponse])
@@ -53,7 +61,7 @@ async def login_start(body: StartLoginRequest, _=Depends(get_current_user)):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.post("/login/complete", response_model=MessageResponse)
+@router.post("/login/complete", response_model=AccountAddedResponse)
 async def login_complete(
     body: CompleteLoginRequest,
     current_user=Depends(get_current_user),
@@ -66,7 +74,9 @@ async def login_complete(
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-    # Record which web UI user added this Audible account
+    # Record which web UI user added this Audible account, and capture its id so the caller can
+    # scan just this account rather than every account on the system.
+    new_account_id: Optional[str] = None
     try:
         accounts = await cli.list_accounts()
         conn = db.connection()
@@ -76,6 +86,7 @@ async def login_complete(
         for acc in accounts:
             aid = acc["account_id"]
             if aid not in existing:
+                new_account_id = aid
                 conn.execute(
                     text(
                         "INSERT OR IGNORE INTO audible_account_settings "
@@ -87,7 +98,7 @@ async def login_complete(
     except Exception:
         pass  # non-fatal — account was already added successfully
 
-    return MessageResponse(message="Account added successfully")
+    return AccountAddedResponse(message="Account added successfully", account_id=new_account_id)
 
 
 @router.patch("/{account_id}/auto-download", response_model=MessageResponse)

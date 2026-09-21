@@ -205,6 +205,8 @@ export function LiberatePage() {
   const [bulkMarking, setBulkMarking] = useState(false);
   const [selectingAll, setSelectingAll] = useState(false);
   const [bulkStatus, setBulkStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [bulkMessage, setBulkMessage] = useState("");
+  const [scanNotice, setScanNotice] = useState("");
   const [error, setError] = useState("");
   const [pageSize, setPageSize] = useState(48);
   const PAGE_SIZES = [24, 48, 96, 200];
@@ -264,6 +266,43 @@ export function LiberatePage() {
     return () => clearInterval(t);
   }, [books, loadBooks]);
 
+  // Refresh the grid when a scan finishes.
+  //
+  // Scans now run on a schedule, so books can appear without the user doing anything — but this
+  // page only reloaded on mount or on a filter change, so a scheduled scan that imported new books
+  // left the grid stale until a manual refresh. Watching the latest scan id means "the library
+  // changed" reaches the page that displays the library.
+  //
+  // Polls every 10s (scans are minutes apart, not seconds) and reloads silently.
+  useEffect(() => {
+    let lastSeen: number | null = null;
+    let cancelled = false;
+
+    const check = async () => {
+      try {
+        const { data } = await api.get("/downloads/scan/latest");
+        if (cancelled || !data) return;
+        const finished = data.status === "complete" || data.status === "error";
+        if (lastSeen === null) { lastSeen = finished ? data.id : null; return; }
+        if (finished && data.id !== lastSeen) {
+          lastSeen = data.id;
+          if (data.books_added > 0 || data.status === "complete") {
+            await loadBooks(true);
+            if (data.books_added > 0) {
+              setScanNotice(
+                `Library scan finished — ${data.books_added} new book${data.books_added !== 1 ? "s" : ""} added.`
+              );
+            }
+          }
+        }
+      } catch { /* 404 until the first scan exists; nothing to do */ }
+    };
+
+    check();
+    const t = setInterval(check, 10000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [loadBooks]);
+
   const handleMark = async (book: LiberateBook, liberated: boolean) => {
     try {
       await api.patch(`/liberate/books/${book.book_id}`, { liberated });
@@ -304,10 +343,31 @@ export function LiberatePage() {
   const confirmSelected = async () => {
     if (selected.size === 0) return;
     const toQueue = books.filter(b => selected.has(b.book_id));
+    let queued = 0;
+    // Failures used to break the loop silently: queue 50 books, hit a cap at book 3, and the other
+    // 47 vanished with no message. Say how far we got and why we stopped.
     for (const book of toQueue) {
       try {
         await api.post("/downloads", { book_id: book.book_id, book_title: book.title });
-      } catch { /* individual failures are silent; cap 429 stops the loop */ break; }
+        queued++;
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+        let reason: string;
+        if (typeof detail === "object" && detail && "resets_at" in detail) {
+          reason = `download cap reached (resets at ${new Date((detail as { resets_at: string }).resets_at).toLocaleTimeString()})`;
+        } else {
+          reason = typeof detail === "string" ? detail : "an unexpected error";
+        }
+        setError(
+          `Queued ${queued} of ${toQueue.length} books. Stopped at "${book.title}" — ${reason}.`
+        );
+        break;
+      }
+    }
+    if (queued === toQueue.length) {
+      setBulkMessage(
+        `Queued ${queued} book${queued !== 1 ? "s" : ""}. They download one at a time — see the Downloads page.`
+      );
     }
     setSelected(new Set());
     await loadBooks();
@@ -349,16 +409,40 @@ export function LiberatePage() {
   const downloadAll = async () => {
     setBulkStatus("running");
     setError("");
+    setBulkMessage("");
     try {
-      await api.post("/liberate/download-all");
+      const { data } = await api.post("/liberate/download-all");
+      const { queued = 0, skipped = 0, total = 0 } = data ?? {};
       setBulkStatus("done");
-    } catch {
+      if (total === 0) {
+        setBulkMessage("Nothing to download — every book in this view is already downloaded.");
+      } else {
+        setBulkMessage(
+          `Queued ${queued} book${queued !== 1 ? "s" : ""}` +
+          (skipped > 0 ? ` (${skipped} already queued or downloading)` : "") +
+          ". They download one at a time — see the Downloads page for progress."
+        );
+      }
+      await loadBooks();
+    } catch (err: unknown) {
+      // This used to be a bare `catch` that discarded the error, so a 403, a 500 and a dropped
+      // connection all printed the same dead-end string with no way to tell them apart.
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
       setBulkStatus("error");
-      setError("Failed to start bulk download.");
+      setError(
+        typeof detail === "string"
+          ? detail
+          : "Could not queue the bulk download. Check the server log in Settings for details."
+      );
     }
   };
 
+  // Two different endpoints, two different permission flags. Per-book downloads hit POST /downloads
+  // (can_download); Download All hits POST /liberate/download-all (can_liberate). The Download All
+  // button used to be gated on can_download, so a user granted one flag but not the other saw a
+  // button guaranteed to return 403.
   const canDownload = user?.is_admin || (user?.permissions?.can_download ?? true);
+  const canBulkDownload = user?.is_admin || (user?.permissions?.can_liberate ?? true);
   const isCapExhausted = cap && cap.cap !== null && cap.remaining === 0;
   const hasNoCapAndAdmin = user?.is_admin || cap?.cap === null;
 
@@ -366,11 +450,29 @@ export function LiberatePage() {
     <div className="space-y-4">
       {error && <Alert variant="error" className="mb-2">{error}<button className="ml-2 underline text-xs" onClick={() => setError("")}>dismiss</button></Alert>}
 
-      {/* Bulk liberate banner */}
+      {/* Bulk queue banners. The old copy claimed "LibationCli is liberating all unliberated books"
+          and was dismissed the instant the request returned — describing work that had not started
+          and then hiding itself while it ran. Books are now added to a queue, so say that. */}
       {bulkStatus === "running" && (
         <Alert variant="info">
           <Loader2 className="inline h-3.5 w-3.5 animate-spin mr-1" />
-          Bulk download in progress — LibationCli is liberating all unliberated books. Check the Downloads page for progress.
+          Adding books to the download queue…
+        </Alert>
+      )}
+
+      {bulkStatus === "done" && bulkMessage && (
+        <Alert variant="success">
+          {bulkMessage}
+          <button className="ml-2 underline text-xs" onClick={() => { setBulkStatus("idle"); setBulkMessage(""); }}>dismiss</button>
+        </Alert>
+      )}
+
+      {/* A scheduled scan can add books while this page is open. The grid refreshes itself; this
+          says so, otherwise books appear with no explanation of where they came from. */}
+      {scanNotice && (
+        <Alert variant="info">
+          {scanNotice}
+          <button className="ml-2 underline text-xs" onClick={() => setScanNotice("")}>dismiss</button>
         </Alert>
       )}
 
@@ -513,9 +615,14 @@ export function LiberatePage() {
                 </>
               )}
 
-              {canDownload && !isCapExhausted && selected.size === 0 && (
+              {canBulkDownload && !isCapExhausted && selected.size === 0 && (
                 hasNoCapAndAdmin ? (
-                  <Button size="sm" onClick={downloadAll} loading={bulkStatus === "running"}>
+                  <Button
+                    size="sm"
+                    onClick={downloadAll}
+                    loading={bulkStatus === "running"}
+                    title="Queue every book that has not been downloaded yet. They download one at a time."
+                  >
                     <Download className="h-3.5 w-3.5" /> Download All
                   </Button>
                 ) : cap && cap.remaining! > 0 ? (

@@ -62,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
         ffmpeg \
         libicu76 \
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Install LibationCli from .deb (self-contained, includes .NET runtime)

@@ -12,6 +12,7 @@ from ..models.download import Download, Scan
 from ..models.user import DEFAULT_PERMISSIONS
 from ..schemas.downloads import DownloadRequest, DownloadResponse, ScanResponse
 from ..services import cli
+from ..services.logger import get_logger
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
@@ -51,31 +52,51 @@ def _enforce_cap(user, db: Session) -> None:
 
 # ── Background tasks ──────────────────────────────────────────────────────────
 
+def enqueue_book(book_id: str, user_id: int, book_title: str | None = None) -> bool:
+    """Add one book to the download queue. Returns False if it is already queued or running.
+
+    Every path that wants a book downloaded goes through here — manual, bulk and auto-download — so
+    the duplicate guard and the serial queue apply uniformly. Nothing here starts a download; the
+    single `_download_worker` does that, one book at a time.
+    """
+    with SessionLocal() as db:
+        existing = db.query(Download).filter(
+            Download.book_id == book_id,
+            Download.status.in_(["queued", "running"]),
+        ).first()
+        if existing:
+            return False
+        db.add(Download(
+            book_id=book_id,
+            book_title=book_title,
+            user_id=user_id,
+            status="queued",
+        ))
+        db.commit()
+    return True
+
+
 async def _auto_download_if_enabled() -> None:
-    """After a successful scan, sequentially download un-liberated books for opted-in Audible accounts."""
+    """After a successful scan, queue un-downloaded books for opted-in Audible accounts.
+
+    This only ENQUEUES. The worker drains the queue one book at a time, so a scan that turns up 200
+    new books does not start 200 downloads.
+
+    The former 30-minute global cooldown was removed: with scheduled scans now able to run as often
+    as every 15 minutes it would have silently skipped auto-download on most of them. The duplicate
+    guard in `enqueue_book` plus the serial queue already prevent the stampede it was guarding
+    against.
+    """
     from ..services import libation as libation_svc
     from ..models.user import User as UserModel
 
+    logger = get_logger()
     opted_in: list[str] = []
     admin_id: int = 1
 
     with SessionLocal() as db:
         try:
             conn = db.connection()
-            row = conn.execute(text(
-                "SELECT value FROM system_settings WHERE key = 'last_auto_download_at'"
-            )).first()
-            last_str = (row[0] if row else "") or ""
-            if last_str:
-                try:
-                    last_dt = datetime.fromisoformat(last_str)
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) - last_dt < timedelta(minutes=30):
-                        return
-                except ValueError:
-                    pass
-
             rows = conn.execute(text(
                 "SELECT account_id FROM audible_account_settings WHERE auto_download = 1"
             )).fetchall()
@@ -88,36 +109,199 @@ async def _auto_download_if_enabled() -> None:
                 admin_id = admin.id
 
             conn.execute(text(
-                "UPDATE system_settings SET value = :v WHERE key = 'last_auto_download_at'"
+                "INSERT INTO system_settings (key, value) VALUES ('last_auto_download_at', :v) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             ), {"v": datetime.now(timezone.utc).isoformat()})
             db.commit()
-        except Exception:
+        except Exception as exc:
+            logger.error("[auto-download] Could not read opted-in accounts: %s", exc, exc_info=True)
             return
 
+    total_queued = 0
     for account_id in opted_in:
         book_ids = libation_svc.get_liberate_book_ids(
             filter_status="not_liberated",
             account_id=account_id,
         )
-        for book_id in book_ids:
+        queued = sum(1 for book_id in book_ids if enqueue_book(book_id, admin_id))
+        total_queued += queued
+        logger.info("[auto-download] Account %s: %d un-downloaded book(s), %d newly queued",
+                    account_id, len(book_ids), queued)
+
+    if total_queued:
+        logger.info("[auto-download] Queued %d book(s) across %d account(s)",
+                    total_queued, len(opted_in))
+
+
+# ── The download queue worker ─────────────────────────────────────────────────
+#
+# Exactly ONE of these runs, started from the lifespan in main.py. It is the only thing in the app
+# that starts a download, which is what makes "one at a time" true rather than aspirational.
+# Previously every caller spawned its own asyncio task, so queueing N books started N simultaneous
+# downloads — and Audible is liable to flag an account downloading in bulk simultaneously.
+
+_QUEUE_POLL_SECONDS = 2
+
+# Stand-down period once the queue looks like it is failing systemically.
+_BACKOFF_SECONDS = 30 * 60
+
+# Consecutive failures before standing down. One or two failures are ordinary — a title genuinely
+# not owned, a transient network error. Three in a row is a pattern, not bad luck.
+_MAX_CONSECUTIVE_FAILURES = 3
+
+# Explicit rate-limit markers. These trigger a stand-down on the FIRST occurrence when present, but
+# they are a bonus, not the mechanism: Audible reports "CustomerThrottled" only inside the JSON body
+# of the licence response, which Libation logs to its own file and does not surface in the output we
+# capture. So the consecutive-failure counter above is what actually protects the account; matching
+# on these strings alone would have been a guard that never fires.
+_THROTTLE_MARKERS = ("customerthrottled", "being throttled", "too many requests", "429")
+
+
+def _is_throttled(message: str) -> bool:
+    low = (message or "").lower()
+    return any(m in low for m in _THROTTLE_MARKERS)
+
+
+async def _download_worker() -> None:
+    """Drain the download queue serially, pausing `download_delay_seconds` between books."""
+    from ..services.automation import get_download_delay_seconds
+
+    logger = get_logger()
+    logger.info("[queue] Download worker started — one download at a time")
+    consecutive_failures = 0
+
+    while True:
+        try:
             with SessionLocal() as db:
-                existing = db.query(Download).filter(
-                    Download.book_id == book_id,
-                    Download.status.in_(["queued", "running"]),
-                ).first()
-                if existing:
-                    continue
-                dl = Download(
-                    book_id=book_id,
-                    book_title=None,
-                    user_id=admin_id,
-                    status="queued",
+                nxt = (
+                    db.query(Download)
+                    .filter(Download.status == "queued")
+                    .order_by(Download.created_at.asc(), Download.id.asc())
+                    .first()
                 )
-                db.add(dl)
-                db.commit()
-                db.refresh(dl)
-                dl_id = dl.id
+                job = (nxt.id, nxt.book_id, nxt.book_title) if nxt else None
+
+            if job is None:
+                await asyncio.sleep(_QUEUE_POLL_SECONDS)
+                continue
+
+            dl_id, book_id, title = job
+            logger.info("[queue] Starting download %s (%s)", book_id, title or "untitled")
             await _run_download(dl_id, book_id)
+
+            # Stand down when the queue starts failing systemically.
+            #
+            # A throttled account is the worst case: every queued book fails at the licence
+            # endpoint, and without this the queue marches through all of them, making the
+            # throttling worse. Observed live — Audible returned
+            #     "RejectionReason": "CustomerThrottled"
+            # and every download after that failed the same way, including a book owned outright.
+            # Failed books are left as `error`; the ones still waiting stay QUEUED and resume on
+            # their own once the backoff expires.
+            with SessionLocal() as db:
+                finished = db.get(Download, dl_id)
+                failed = bool(finished and finished.status == "error")
+                err = (finished.error_message or "") if finished else ""
+
+            if failed:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            if _is_throttled(err) or consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "[queue] %d consecutive download failure(s) — pausing the queue for %d minutes "
+                    "to avoid hammering Audible. Waiting books are kept and resume automatically. "
+                    "Last error: %s",
+                    consecutive_failures, _BACKOFF_SECONDS // 60, err[:200],
+                )
+                consecutive_failures = 0
+                await asyncio.sleep(_BACKOFF_SECONDS)
+                continue
+
+            delay = get_download_delay_seconds()
+            if delay > 0:
+                # Only pause when more work is waiting — no reason to idle after the last book.
+                with SessionLocal() as db:
+                    more = db.query(Download).filter(Download.status == "queued").first()
+                if more:
+                    logger.info("[queue] Waiting %ds before the next download", delay)
+                    await asyncio.sleep(delay)
+
+        except asyncio.CancelledError:
+            logger.info("[queue] Download worker stopping")
+            raise
+        except Exception as exc:
+            # A crash here would silently stop every future download, so never let the loop die.
+            logger.error("[queue] Worker error: %s", exc, exc_info=True)
+            await asyncio.sleep(_QUEUE_POLL_SECONDS)
+
+
+# ── The scheduled-scan loop ───────────────────────────────────────────────────
+#
+# Also started once from the lifespan. Without this, nothing ever re-scanned the library, so new
+# books were never discovered and auto-download could never fire on its own.
+
+async def _scan_scheduler() -> None:
+    """Run a library scan every `scan_interval_minutes`. 0 disables it."""
+    from ..services.automation import get_scan_interval_minutes
+
+    logger = get_logger()
+
+    # 🔴 last_run is PERSISTED, not in-memory.
+    #
+    # It used to start at None on every process start, so the scheduler scanned immediately on each
+    # container restart. That looked harmless and is not: the entrypoint runs uvicorn in a
+    # `while true` loop, so a crash-looping container would fire a full library scan every restart.
+    # Observed live — three quick rebuilds produced five scans of a 681-title library in 21 minutes,
+    # and Audible responded by throttling the account:
+    #
+    #     "RejectionReason": "CustomerThrottled"   (api.audible.com licenserequest)
+    #
+    # Once throttled, every download fails with ContentLicenseDenied — including books the customer
+    # owns outright. Persisting the timestamp means a restart resumes the existing schedule instead
+    # of restarting it, so restarts are free no matter how many happen.
+    last_run = _get_last_scan_at()
+    logger.info(
+        "[scheduler] Scan scheduler started (last scan: %s)",
+        last_run.isoformat() if last_run else "never",
+    )
+
+    while True:
+        try:
+            # Re-read every tick so a change in Settings applies without a restart.
+            interval = get_scan_interval_minutes()
+            if interval <= 0:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(timezone.utc)
+            if last_run is not None and (now - last_run) < timedelta(minutes=interval):
+                await asyncio.sleep(30)
+                continue
+
+            with SessionLocal() as db:
+                already = db.query(Scan).filter(Scan.status == "running").first()
+                if already:
+                    await asyncio.sleep(30)
+                    continue
+                scan = Scan(status="running", started_at=now)
+                db.add(scan)
+                db.commit()
+                db.refresh(scan)
+                scan_id = scan.id
+
+            last_run = now
+            _set_last_scan_at(now)   # persist BEFORE scanning, so a crash mid-scan cannot loop
+            logger.info("[scheduler] Starting scheduled library scan (every %d min)", interval)
+            await _run_scan(scan_id)
+
+        except asyncio.CancelledError:
+            logger.info("[scheduler] Scan scheduler stopping")
+            raise
+        except Exception as exc:
+            logger.error("[scheduler] Error: %s", exc, exc_info=True)
+            await asyncio.sleep(60)
 
 
 async def _run_download(download_id: int, book_id: str) -> None:
@@ -147,20 +331,119 @@ async def _run_download(download_id: int, book_id: str) -> None:
             dl.progress = 100 if exit_code == 0 else dl.progress
             dl.completed_at = datetime.now(timezone.utc)
             if exit_code != 0:
-                dl.error_message = output[-500:]
+                dl.error_message = _summarize_error(output)
             db.commit()
 
 
-async def _run_scan(scan_id: int) -> None:
+_LAST_SCAN_KEY = "last_scheduled_scan_at"
+
+
+def _get_last_scan_at() -> "datetime | None":
+    """When the library was last scanned, across restarts. See the note in `_scan_scheduler`.
+
+    Falls back to the newest row in `scans` when the key is absent. That matters on UPGRADE: an
+    existing install has scan history but no stored key, so without this fallback the very first
+    start on a new image would scan immediately — reintroducing, once per upgrade, exactly the
+    behaviour this is here to prevent.
+    """
     try:
-        exit_code, output = await cli.run_scan()
+        with SessionLocal() as db:
+            conn = db.connection()
+            row = conn.execute(
+                text("SELECT value FROM system_settings WHERE key = :k"), {"k": _LAST_SCAN_KEY}
+            ).first()
+            if row and row[0]:
+                dt = datetime.fromisoformat(row[0])
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+            prior = conn.execute(
+                text("SELECT started_at FROM scans WHERE started_at IS NOT NULL "
+                     "ORDER BY id DESC LIMIT 1")
+            ).first()
+        if prior and prior[0]:
+            dt = prior[0] if isinstance(prior[0], datetime) else datetime.fromisoformat(str(prior[0]))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return None
+    except Exception:
+        return None
+
+
+def _set_last_scan_at(when: datetime) -> None:
+    try:
+        with SessionLocal() as db:
+            db.connection().execute(
+                text(
+                    "INSERT INTO system_settings (key, value) VALUES (:k, :v) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                ),
+                {"k": _LAST_SCAN_KEY, "v": when.isoformat()},
+            )
+            db.commit()
+    except Exception as exc:
+        get_logger().error("[scheduler] Could not persist last scan time: %s", exc)
+
+
+_EXCEPTION_RE = re.compile(r"^\s*(?:[\w.]+\.)?(\w*Exception|\w*Error)\s*:\s*(.+)$", re.MULTILINE)
+
+
+def _summarize_error(output: str, limit: int = 500) -> str:
+    """Turn CLI/bridge output into something a user can act on.
+
+    This used to be `output[-500:]` — the *tail* of the text. For a .NET stack trace that is the
+    innermost frames, so the UI showed things like:
+
+        s.Factory.cs:line 124
+           at FileLiberator.DownloadOptions.GetDownloadLicenseAsync(...)
+
+    ...cut off mid-word, while the line that actually says what went wrong sits at the TOP:
+
+        AudibleApi.ContentLicenseDeniedException: Content License denied for asin: [B0H7KZ2YSB]
+
+    So: lead with the exception message when there is one, and keep a little context after it.
+    Falls back to the HEAD of the output rather than the tail, since CLI tools put the summary first.
+    """
+    if not output:
+        return ""
+    text_ = output.strip()
+
+    m = _EXCEPTION_RE.search(text_)
+    if m:
+        headline = f"{m.group(1)}: {m.group(2)}".strip()
+        return headline[:limit]
+
+    # No exception line — the first few non-empty lines are the useful part.
+    lines = [ln.strip() for ln in text_.splitlines() if ln.strip()]
+    return " / ".join(lines[:3])[:limit] if lines else text_[:limit]
+
+
+def _parse_books_added(output: str) -> int:
+    """Pull the new-book count out of a `libationcli scan` result.
+
+    LibationCli 13.x prints:
+
+        Scan complete.
+        Total processed: 682
+        New: 1
+
+    The original pattern looked for `N new book`, which that output never contains — so every scan
+    recorded `books_added = 0` and the UI reported "Scan complete — 0 new books added" even when it
+    had just imported one. The older phrasing is kept as a fallback in case a different CLI version
+    uses it.
+    """
+    m = re.search(r"^\s*New:\s*(\d+)", output, re.IGNORECASE | re.MULTILINE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d+)\s+new\s+book", output, re.IGNORECASE)
+    return int(m.group(1)) if m else 0
+
+
+async def _run_scan(scan_id: int, account_id: str | None = None) -> None:
+    try:
+        exit_code, output = await cli.run_scan(account_id=account_id)
     except Exception as e:
         exit_code, output = 1, str(e)
 
-    books_added = 0
-    m = re.search(r"(\d+)\s+new\s+book", output, re.IGNORECASE)
-    if m:
-        books_added = int(m.group(1))
+    books_added = _parse_books_added(output)
 
     with SessionLocal() as db:
         scan = db.get(Scan, scan_id)
@@ -170,7 +453,7 @@ async def _run_scan(scan_id: int) -> None:
             scan.books_added = books_added
             scan.output = output[:4000]
             if exit_code != 0:
-                scan.error_message = output[-500:]
+                scan.error_message = _summarize_error(output)
             db.commit()
 
     if exit_code == 0:
@@ -179,18 +462,73 @@ async def _run_scan(scan_id: int) -> None:
 
 # ── Scan endpoints ────────────────────────────────────────────────────────────
 
+# Minimum gap between MANUAL scans before we push back. Scheduled scans have their own interval and
+# are not affected. 10 minutes is deliberately lenient: it is meant to stop back-to-back clicking,
+# not to stop someone scanning when they have a reason to.
+_MANUAL_SCAN_COOLDOWN_MINUTES = 10
+
+
 @router.post("/scan", response_model=ScanResponse, tags=["library"])
-async def start_scan(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+async def start_scan(
+    account_id: str | None = None,
+    force: bool = False,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Scan the library. With `account_id`, scans only that Audible account.
+
+    `libationcli scan` takes optional positional account IDs; omitting one scans every account,
+    which is the historical behaviour and remains the default.
+
+    Refuses with 429 if a scan ran within the last `_MANUAL_SCAN_COOLDOWN_MINUTES`, unless
+    `force=true`. Every scan queries Audible for the entire library, and scanning repeatedly gets
+    the ACCOUNT rate-limited — after which downloads fail with a licence denial even for books the
+    user owns outright. Observed for real: five scans of a 681-title library inside 21 minutes,
+    followed by `"RejectionReason": "CustomerThrottled"` on every subsequent download.
+
+    A user clicking a refresh button repeatedly has no way to know they are doing that to their own
+    Audible account, so the UI has to say it. The override exists because there are legitimate
+    reasons to rescan immediately — it just should not be the accidental default.
+    """
     _require_permission("can_scan", current_user)
     already_running = db.query(Scan).filter(Scan.status == "running").first()
     if already_running:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="A scan is already in progress")
+
+    if not force:
+        last = (
+            db.query(Scan)
+            .filter(Scan.started_at.isnot(None))
+            .order_by(Scan.id.desc())
+            .first()
+        )
+        if last is not None and last.started_at is not None:
+            started = last.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            elapsed = datetime.now(timezone.utc) - started
+            if elapsed < timedelta(minutes=_MANUAL_SCAN_COOLDOWN_MINUTES):
+                mins_ago = max(0, int(elapsed.total_seconds() // 60))
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "message": (
+                            f"The library was scanned {mins_ago} minute(s) ago. Scanning repeatedly "
+                            f"can get your Audible account rate-limited, which makes downloads fail "
+                            f"until it clears."
+                        ),
+                        "last_scan_at": started.isoformat(),
+                        "minutes_ago": mins_ago,
+                        "cooldown_minutes": _MANUAL_SCAN_COOLDOWN_MINUTES,
+                        "can_override": True,
+                    },
+                )
     scan = Scan(status="running", started_at=datetime.now(timezone.utc))
     db.add(scan)
     db.commit()
     db.refresh(scan)
-    asyncio.create_task(_run_scan(scan.id))
+    asyncio.create_task(_run_scan(scan.id, account_id))
     return scan
 
 
@@ -236,7 +574,8 @@ async def queue_download(
     db.add(dl)
     db.commit()
     db.refresh(dl)
-    asyncio.create_task(_run_download(dl.id, body.book_id))
+    # No task is spawned here. The single `_download_worker` picks this row up, so queueing N books
+    # results in N queued rows and one active download — not N concurrent downloads.
     return dl
 
 

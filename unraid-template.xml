@@ -90,6 +90,11 @@
       <Mode/>
     </Variable>
     <Variable>
+      <Value>America/New_York</Value>
+      <Name>TZ</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
       <Value>15</Value>
       <Name>ACCESS_TOKEN_EXPIRE_MINUTES</Name>
       <Mode/>

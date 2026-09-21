@@ -112,13 +112,16 @@ function EmptyState({ reason, search }: { reason?: string; search: string }) {
         <>
           <h2 className="text-base font-semibold text-slate-700 mb-1">No library yet</h2>
           <p className="text-sm text-slate-400 max-w-xs">
-            Connect an Audible account and run a scan to populate your library.
+            Connect an Audible account — its library is scanned automatically once it's added.
           </p>
         </>
       ) : (
         <>
           <h2 className="text-base font-semibold text-slate-700 mb-1">Library is empty</h2>
-          <p className="text-sm text-slate-400">Scan your Audible library to see books here.</p>
+          <p className="text-sm text-slate-400">
+            Books appear after a library scan. Scans run automatically on the schedule set in
+            Settings, or use Scan Library on the Audible Accounts page.
+          </p>
         </>
       )}
     </div>

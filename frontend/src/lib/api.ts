@@ -121,4 +121,10 @@ export const settingsApi = {
 
   getStats: () =>
     api.get("/settings/stats"),
+
+  getAutomation: () =>
+    api.get("/settings/automation"),
+
+  updateAutomation: (data: Record<string, unknown>) =>
+    api.put("/settings/automation", data),
 };

@@ -22,6 +22,9 @@ services:
       - REFRESH_TOKEN_EXPIRE_DAYS=60
       - PUID=1000
       - PGID=1000
+      # Container timezone. Without it everything is logged in UTC with nothing saying so.
+      # Any tz database name works, e.g. America/Chicago, Europe/London, Australia/Sydney.
+      - TZ=${TZ:-Etc/UTC}
     restart: unless-stopped
 
 volumes:

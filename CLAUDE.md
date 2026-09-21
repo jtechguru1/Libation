@@ -48,7 +48,10 @@ A Dockerized web application that wraps the LibationCli audiobook manager with a
 - `downloads`: id, book_id, book_title, user_id, status, progress, started_at, completed_at, error_message, created_at
 - `scans`: id, status, started_at, completed_at, books_added, output, error_message
 - `audible_account_settings`: account_id (TEXT PK), added_by_user_id (INTEGER), auto_download (INTEGER DEFAULT 0) — created via `_migrate_db`; tracks which web UI user added each Audible account and whether auto-download is enabled
-- `system_settings`: key (TEXT PK), value (TEXT DEFAULT '') — created via `_migrate_db`; currently holds one row: `last_auto_download_at` (ISO timestamp of the last auto-download run, empty string when never run)
+- `system_settings`: key (TEXT PK), value (TEXT DEFAULT '') — created via `_migrate_db`; holds:
+  - `last_auto_download_at` — ISO timestamp of the last auto-download run (informational only since Phase 9; it no longer gates anything)
+  - `scan_interval_minutes` — minutes between scheduled library scans, default `360`; `0` disables
+  - `download_delay_seconds` — pause between consecutive downloads, default `30`; `0` means back-to-back
 
 ## Permissions system
 - `DEFAULT_PERMISSIONS` in `models/user.py`: all flags `true` except `can_remove_downloads = false`
@@ -63,8 +66,29 @@ A Dockerized web application that wraps the LibationCli audiobook manager with a
 - `GET /api/liberate/book-ids` — returns all matching book IDs (no pagination) for Select All across pages; accepts same filter params including `purchased`
 - `PATCH /api/liberate/books/{book_id}` — sets `UserDefinedItem.BookStatus` (1=liberated, 0=not liberated); INSERTs row if missing (provides all NOT NULL cols: BookStatus, IsFinished, Ratings, Tags)
 - `GET /api/liberate/cap` — current cap accounting for logged-in user
-- `POST /api/liberate/download-all` — fires `libationcli liberate` (no-args); only available when user has no cap
+- `POST /api/liberate/download-all` — **enqueues** every `not_liberated` book into the serial download queue (optional `account_id` filter); returns `{queued, skipped, total}`. Only available when the user has no cap; requires `can_liberate`. It no longer shells out to `libationcli liberate` — see *Download queue* below
 - Individual downloads still go through `POST /api/downloads` with per-call cap enforcement
+
+## Download queue (`backend/app/api/downloads.py`)
+🔑 **Exactly one download runs at a time, process-wide.** Audible is liable to flag an account that
+downloads many books simultaneously.
+- `_download_worker()` — a single asyncio task started from the `main.py` lifespan. It is the **only**
+  code that starts a download. It picks the oldest `status="queued"` row (by `created_at`, then `id`),
+  awaits `_run_download()`, then sleeps `download_delay_seconds` if more work is waiting. It never dies:
+  every exception is caught and logged, or the app would silently stop downloading forever.
+- `enqueue_book(book_id, user_id, book_title)` — the single entry point for queueing. Returns `False`
+  if the book is already `queued` or `running`. Manual, bulk and auto-download all go through it.
+- `POST /api/downloads` inserts a `queued` row and returns. **It does not spawn a task** — previously
+  every caller did, so queueing N books started N concurrent downloads.
+- **Restart handling** (`main.py` lifespan): rows left `running` are set back to `queued` and resume;
+  `queued` rows are untouched. Both used to be flipped to `error`, so restarting mid-batch discarded it.
+
+## Scheduled scans (`_scan_scheduler` in `backend/app/api/downloads.py`)
+- A second lifespan task. Every tick it re-reads `scan_interval_minutes` (so a Settings change applies
+  without a restart), and if the interval has elapsed and no scan is running, starts one. `0` = off.
+- On a successful scan, `_run_scan` chains into `_auto_download_if_enabled` exactly as before.
+- Before this existed nothing ever re-scanned the library, so new books were never discovered and
+  auto-download could not fire on its own.
 
 ## Version endpoint (`backend/app/api/updates.py`)
 - `GET /api/updates/version` — returns installed CLI version (parsed from `libationcli --version`); read-only, no GitHub polling
@@ -122,10 +146,10 @@ docker compose up --build
   - `GET /health` — readiness probe (`{"status":"ok"}`)
   - `GET /debug` — diagnostic: DB path + book count + sample ASINs
   - `GET /accounts` — shim over `libationcli list-accounts --bare --libationFiles /config`
-  - `POST /scan` — synchronous: runs `libationcli scan --libationFiles /config`, awaits exit, returns `{"exit_code","output"}`; Kestrel keepalive set to 12 min
+  - `POST /scan[?account=<id>]` — synchronous: runs `libationcli scan [<account>] --libationFiles /config`, awaits exit, returns `{"exit_code","output"}`; Kestrel keepalive set to 12 min. `libationcli scan` takes optional **positional** account IDs; omitting one scans every account. The account id is rejected with 400 if it starts with `-` or contains whitespace, so it cannot be parsed as a flag or split into extra arguments
   - `POST /download/{asin}` — 202 immediately; starts `DownloadDecryptBook.Create(config).ProcessAsync(book)` in background Task; `StreamingProgressChanged` handler updates in-memory `_progress[asin].Progress` (real 0–100%)
   - `GET /progress/{asin}` — returns `{"asin","progress","status","output"}` or 404
-  - `POST /download-all` — 202 immediately; fires `libationcli liberate --force --libationFiles /config` in background
+  - ~~`POST /download-all`~~ — **removed.** It ran `libationcli liberate --force`, which downloads concurrently under its own control — the opposite of the one-at-a-time rule the web UI now enforces. It also set `RedirectStandardOutput` without ever reading the pipe, so a chatty CLI could fill the buffer, block forever, and leave its `Interlocked` "already running" flag stuck at 1, permanently 409-ing every later call. Bulk downloads now arrive as individual `POST /download/{asin}` calls from the serial queue
 - Completed progress entries expire after 1 hour via background cleanup Task
 - **Dockerfile**: `bridge-builder` stage (between frontend-builder and runtime) installs Libation `.deb` so MSBuild resolves `<HintPath>/usr/lib/libation/*.dll>` at compile time; builds with `dotnet publish -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false`; binary copied to runtime image at `/usr/lib/libation/libation-bridge`
 
@@ -148,7 +172,9 @@ docker compose up --build
 - `POST /api/downloads` creates a `Download` row with `user_id`, fires task to call `cli.run_liberate(asin)` → bridge `POST /download/{asin}` + poll `GET /progress/{asin}`
 - Background tasks update DB rows as progress changes; frontend polls `/api/downloads` every 2s
 - Duplicate active downloads blocked with 409
-- **Auto-download after scan** (`_auto_download_if_enabled`): called via `asyncio.create_task` after every successful scan. Reads `audible_account_settings` for accounts with `auto_download=1`; enforces a 30-minute global cooldown via `system_settings.last_auto_download_at`; for each opted-in account fetches `not_liberated` book IDs and queues them as individual downloads under the admin user, skipping any already active.
+- **Auto-download after scan** (`_auto_download_if_enabled`): called via `asyncio.create_task` after every successful scan, scheduled or manual. Reads `audible_account_settings` for accounts with `auto_download=1`; for each, fetches `not_liberated` book IDs and **enqueues** them under the admin user via `enqueue_book`, which skips anything already queued or running.
+  - ⚠ The 30-minute global cooldown was **removed**. With scheduled scans able to run every 15 minutes it would have silently skipped auto-download on most of them — the setting would have said 15 and behaved like 30. The duplicate guard plus the serial queue already prevent the stampede it was guarding against. `system_settings.last_auto_download_at` is still written, but only as a record; nothing reads it to gate anything.
+- `POST /api/downloads/scan?account_id=<id>` — optional `account_id` scans a single Audible account.
 
 ## User management (`backend/app/api/users.py`)
 - Admin-only routes behind `require_admin` dependency
@@ -158,6 +184,7 @@ docker compose up --build
 
 ## Settings & Stats (`backend/app/api/settings.py`)
 - `GET/PUT /api/settings/libation` — reads/writes `/config/appsettings.json` (resilient: merges only known keys)
+- `GET/PUT /api/settings/automation` — **admin-only**; `scan_interval_minutes` (0/15/30/60/180/360/720/1440, default 360) and `download_delay_seconds` (0/15/30/60/300, default 30). Values live in `system_settings`; anything outside the allowed set is rejected with 422. Backed by `services/automation.py`, which upserts with `ON CONFLICT` — a bare `UPDATE` would affect zero rows for a key that was never seeded, making a saved setting look accepted while changing nothing. Surfaced as the **Automation** card at the top of the Settings page
 - `GET /api/settings/stats` — total_books (LibationContext.db), total_downloads (our DB), accounts_count (bridge `/accounts`), downloads_per_user (JOIN)
 - Field map: Python snake_case ↔ Libation PascalCase key names
 
@@ -171,6 +198,7 @@ docker compose up --build
 - Writes to `/config/logs/libation-web.log` (on the mapped `/config` volume — survives container restarts)
 - `RotatingFileHandler`: 5 MB per file, 3 backups (`libation-web.log`, `.1`, `.2`, `.3`)
 - Log format: `YYYY-MM-DD HH:MM:SS [LEVEL] message`
+- 🔑 **`log_cli` logs a non-zero exit at ERROR, with its output.** It used to log every call at INFO with the output at DEBUG regardless of outcome, so a failed download produced **nothing** under `GET /api/logs?level=error` while the full reason sat in the same file at DEBUG — the user saw a blank screen and had no way to find out why. Successful calls still log INFO + DEBUG output as before.
 - Logged events:
   - **Startup**: server starting, stuck downloads/scans reset, ready
   - **list-accounts**: bridge `/accounts` call + duration
@@ -212,6 +240,18 @@ docker compose up --build
 - **Phase 7 seed fix** (complete): `_seed_admin` in `main.py` rewritten to use raw SQL (`conn.execute()`) instead of ORM (`db.add(User(...))`). Root cause: `_migrate_db` calls `db.connection()` which acquires a DBAPI connection and begins a transaction; if no migrations run, no `db.commit()` is called, leaving the session with a dangling connection. The subsequent ORM `db.commit()` in the old `_seed_admin` did not reliably persist the row. The raw SQL approach shares the same connection path as `_migrate_db` and works correctly. Also added try/except with explicit logger.error logging and flush=True on print so failures are never silent.
 - **Phase 7** (complete): LibationBridge ASP.NET Core 10 sidecar replaces subprocess calls for downloads and scans. New `libation-bridge/` directory with `LibationBridge.csproj` and `Program.cs`. Bridge references Libation DLLs at `/usr/lib/libation/` directly via `AssemblyResolve` hook + `[MethodImpl(NoInlining)]` isolation. Real `StreamingProgressChanged` events (0–100%) replace fake 5/95 progress jumps from stdout parsing. Dockerfile gains a `bridge-builder` stage (Stage 2) that installs the Libation `.deb` for compile-time DLL resolution then publishes a self-contained single-file binary. Entrypoint pre-seeds `/config/Libation/appsettings.json` with `{"LibationFiles":"/config"}` so the bridge's Libation scaffolding uses the same config path as `libationcli`. `cli.py` rewritten to route downloads and scans through bridge HTTP; login stays PTY subprocess. `BRIDGE_URL` added to `config.py`.
 - **Phase 8** (complete): Operational hardening — auto-download, default-credentials UX, log viewer, and sidebar polish. Per-Audible-account auto-download toggle stored in new `audible_account_settings` table; `_auto_download_if_enabled()` fires after every successful scan with a 30-min global cooldown via `system_settings`. OAuth flow auto-triggers a library scan and shows a dismissable info banner on completion. `GET /api/auth/default-credentials` detects factory-default credentials; SettingsPage shows amber warning banner + `UpdateCredentialsSection` (change username + password in one step, then signs out). `POST /api/auth/change-username` added. Logs API (`GET /api/logs`, `GET /api/logs/download`) + `LogsSection` embedded in Settings (level filter, line count, auto-refresh, download). `ApiDocsSection` in Settings links to `/docs` and `/redoc`. Sidebar nav renamed "Accounts" → "Audible Accounts". `UserAdminResponse.created_at` made Optional to handle NULL rows from early-seeded users. `AccountResponse` gains `auto_download` and `added_by_user_id` fields.
+- **Phase 9 Extended** (complete): First-run onboarding, account-owner assignment on the Accounts page, and a scan-result parsing fix.
+  - **First-run onboarding** (`pages/OnboardingPage.tsx` + `OnboardingGate` in `App.tsx`): a signed-in user still on the seeded `admin`/`admin` is shown a full-screen onboarding step ahead of every route, and cannot reach the app until username + password are changed. Previously the only signal was an amber banner inside Settings — a page a brand-new user has no reason to open — so an install could run indefinitely on factory credentials. The gate **fails open**: if `GET /api/auth/default-credentials` errors, the app loads normally, because a network blip must not lock someone out of their own library. Username is changed before password, since `change-password` revokes all sessions.
+  - **Owner assignment on the Accounts page** (`AccountsPage.tsx`): admins get a user dropdown per Audible account row plus that user's owner name. This is the same operation as `OwnerInfoCell` in Settings → User Management, keyed by *account* instead of by *user*. Assigning clears the previous holder first — otherwise two users could both claim one account and the displayed owner would depend on row order. `GET /api/users` is admin-only, so non-admins keep the existing self-service owner-name input and never trigger a 403.
+  - 🔑 **`books_added` was always 0** (`_parse_books_added`). `_run_scan` searched for `N new book`, but LibationCli 13.x prints `Total processed: 682` / `New: 1`. A scan that imported a book therefore reported "Scan complete — 0 new books added". Now parses `New: <n>` with the old phrasing kept as a fallback. Confirmed against real captured scan output (`New: 1` → 1, `New: 681` → 681).
+- **Phase 9** (complete): Download queue, scheduled scans, per-account scan. Six reported issues, which reduced to three defects and three missing features that chained together.
+  - **`POST /api/liberate/download-all` had never worked on this branch** — it was `def`, not `async def`, so the `asyncio.create_task` it ended with raised `RuntimeError: no running event loop` in FastAPI's sync threadpool. A 500 on every call, for every user including admin, surfacing as "Failed to start bulk download". It is now `async def` and enqueues rather than shelling out.
+  - **Serial download queue.** A single `_download_worker` lifespan task is the only thing that starts a download; `POST /api/downloads` merely inserts a `queued` row. Previously each caller spawned its own task, so queueing N books started N concurrent downloads — and Download All handed the whole job to `libationcli liberate --force`, which parallelises internally. Configurable pause between books.
+  - **Scheduled scans.** A `_scan_scheduler` lifespan task re-scans on a configurable interval (default 6h, as low as 15 min, `0` = off). Nothing re-scanned the library before, which is why auto-download appeared broken: it only ever runs after a scan.
+  - **Per-account scan.** Bridge `POST /scan` takes an optional `account` positional arg; a **Scan Library** button sits on each row of the Audible Accounts page, and adding an account now scans *that* account and reports failures instead of swallowing them with `.catch(() => {})`.
+  - **Removed:** bridge `POST /download-all` (concurrent + latent pipe-buffer wedge) and the 30-minute auto-download cooldown (incompatible with a 15-minute scan interval).
+  - **Error surfacing:** `log_cli` logs non-zero exits at ERROR; the bulk-download handler reads the server's real message instead of discarding the exception; the multi-select loop reports which book it stopped at and why.
+  - **Restart safety:** interrupted `running` downloads are requeued rather than failed, so restarting mid-batch no longer discards the rest of the queue.
 - **Phase 8 Extended** (complete): Owner name editable input added directly to AccountsPage for accounts the logged-in user added (`added_by_user_id === user.id`); saves via `PATCH /api/auth/me` on blur/Enter; amber banner shown when `owner_name` is unset. "Purchased" filter tab added to Liberate page between All and Audible Plus; filters on `LibraryBooks.IsAudiblePlus=0` in both `get_liberate_books()` and `get_liberate_book_ids()`.
 
 ## Pre-push sanitization (REQUIRED before any `git push`)

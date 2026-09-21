@@ -215,17 +215,26 @@ async def complete_login(session_id: str, response_url: str) -> str:
 
 async def run_scan(
     on_line: Optional[Callable[[str], Awaitable[None]]] = None,
+    account_id: Optional[str] = None,
 ) -> tuple[int, str]:
+    """Scan the Libation library. With `account_id`, scans only that Audible account.
+
+    `libationcli scan` takes optional positional account IDs; omitting one scans every account,
+    which stays the default.
+    """
     logger = get_logger()
-    logger.info("[scan] Starting library scan via bridge")
+    logger.info("[scan] Starting library scan via bridge%s",
+                f" for account {account_id}" if account_id else " (all accounts)")
     t0 = time.monotonic()
+    params = {"account": account_id} if account_id else None
     async with httpx.AsyncClient(timeout=_SCAN_TIMEOUT) as client:
-        resp = await client.post(_bridge("/scan"))
+        resp = await client.post(_bridge("/scan"), params=params)
         resp.raise_for_status()
     data = resp.json()
     exit_code: int = data.get("exit_code", 0)
     output: str = data.get("output", "")
-    log_cli("bridge/scan", exit_code, output, time.monotonic() - t0)
+    label = f"bridge/scan {account_id}" if account_id else "bridge/scan"
+    log_cli(label, exit_code, output, time.monotonic() - t0)
     if on_line:
         for line in output.splitlines():
             await on_line(line)
@@ -240,20 +249,21 @@ async def run_liberate(
     force: bool = True,
 ) -> tuple[int, str]:
     logger = get_logger()
-    ids_label = " ".join(book_ids) if book_ids else "(all)"
+
+    # The old no-args branch fired the bridge's /download-all, which ran `libationcli liberate
+    # --force` and downloaded books concurrently outside our control. Bulk now goes through
+    # `POST /api/liberate/download-all`, which enqueues each book into the serial download queue,
+    # so this function only ever handles explicit book IDs.
+    if not book_ids:
+        raise ValueError(
+            "run_liberate requires book_ids. Bulk downloads are enqueued via the download queue."
+        )
+
+    ids_label = " ".join(book_ids)
     logger.info("[liberate] Starting liberate for %s", ids_label)
     t0 = time.monotonic()
 
     async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-        if not book_ids:
-            # Bulk: fire and forget via /download-all
-            resp = await client.post(_bridge("/download-all"))
-            if resp.status_code not in (200, 202, 409):
-                body = resp.json() if "json" in resp.headers.get("content-type", "") else {}
-                raise RuntimeError(body.get("error") or resp.text)
-            log_cli("bridge/liberate all", 0, "started", time.monotonic() - t0)
-            return 0, "Bulk download started"
-
         # Start download(s) — 409 means already running, which is fine
         for asin in book_ids:
             resp = await client.post(_bridge(f"/download/{asin}"))
