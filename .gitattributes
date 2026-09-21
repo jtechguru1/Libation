@@ -1,0 +1,7 @@
+# Files that run inside the Linux image must keep LF line endings even when checked out on
+# Windows (core.autocrlf=true). A CRLF shebang made the container die with
+# "exec /docker-entrypoint.sh: no such file or directory" (2026-09-21).
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.py            text eol=lf
