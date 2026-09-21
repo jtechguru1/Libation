@@ -1,6 +1,10 @@
 import axios from "axios";
 
-export const api = axios.create({ baseURL: "/api" });
+// withCredentials so the httpOnly refresh_token cookie rides along on every same-origin request.
+// Chrome/Firefox attach same-origin cookies without this flag, but Brave's privacy hardening does
+// NOT — so GET /auth/sessions arrived cookie-less in Brave and the "This device" badge never
+// matched (2026-09-21). Refresh/logout already set it inline; this covers the whole instance.
+export const api = axios.create({ baseURL: "/api", withCredentials: true });
 
 let _accessToken: string | null = null;
 

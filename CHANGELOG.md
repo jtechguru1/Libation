@@ -21,6 +21,7 @@ several problems found while verifying the fixes.
   Verified by renaming the admin and restarting three times: no account reappeared.
 
 ### Fixed
+- **"This device" badge did not appear in Brave** (it did in Chrome/Firefox). The session list request did not send credentials explicitly; Brave's privacy hardening then withheld the login cookie from it, so the server could not identify the caller's session. The API client now sends credentials on every request.
 - **Active Sessions showed times 5 hours off and never marked "This device"; the current device could also be logged out unexpectedly.** Session timestamps now carry a UTC offset so the browser shows them in local time (they were emitted naive and read as local). The session cap now evicts the *least-recently-used* session instead of the oldest-created — a silent token refresh keeps `last_used_at` current but not `created_at`, so an actively-used session was being evicted the moment newer logins piled up, which logged the user out, broke the "This device" match and forced another login.
 
 - **Every download failed with `Content License denied`.** Upstream bug
