@@ -39,6 +39,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Libation and immediately starts a fresh sign-in for the same email and locale, so the account is
   registered with Audible as a new device. Library data and per-account settings (auto-download,
   owner) are kept. New endpoint `POST /api/accounts/{id}/reauthenticate`.
+- **Re-authenticate reminder.** Accounts registered under Libation 13.x still carry the broken
+  device registration after the upgrade, and nothing told you. `GET /api/accounts` now flags them
+  (`needs_reauth`, from the length of the stored device serial — 40 hex chars on 13.x, 20 on 14.x),
+  an amber bar under the page header lists them with a link to Audible Accounts, and each account
+  card gets a "Needs re-authentication" badge. The bar can be dismissed (comes back at the next
+  sign-in), snoozed per account for 30 days ("Remind me in 30 days"; "unsnooze" on the card), and
+  disappears on its own once every account has been re-authenticated. Nothing is stored on the
+  server.
 
 ### Changed
 

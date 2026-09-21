@@ -46,6 +46,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccessToken(accessToken);
     setUser(userData);
     scheduleRefresh();
+    // The re-authentication reminder (ReauthBanner) is dismissable per login, so its dismissal
+    // is cleared here rather than in logout(): session expiry nulls the user without calling
+    // logout(), and the silent refresh on mount does not call login(), so a reload keeps it.
+    try { sessionStorage.removeItem(`reauth-dismissed:${userData.id}`); } catch { /* private mode etc. */ }
   }, [scheduleRefresh]);
 
   const logout = useCallback(async () => {

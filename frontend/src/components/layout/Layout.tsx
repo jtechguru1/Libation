@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Sidebar, MobileMenuButton } from "./Sidebar";
+import { ReauthBanner } from "../ReauthBanner";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "Library",
@@ -26,6 +27,9 @@ export function Layout() {
           <MobileMenuButton onClick={() => setSidebarOpen(true)} />
           <h1 className="text-base font-semibold text-slate-900 dark:text-slate-100">{title}</h1>
         </header>
+
+        {/* Re-authentication reminder (rmcrackan/Libation#2021) — renders nothing when no account needs it */}
+        <ReauthBanner />
 
         {/* Main content */}
         <main className="flex-1 overflow-y-auto p-4 md:p-6 scrollbar-thin">

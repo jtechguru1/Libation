@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -47,9 +48,46 @@ async def get_accounts(current_user=Depends(get_current_user), db: Session = Dep
             s = acct_settings.get(acc["account_id"]) or {}
             acc["auto_download"] = s.get("auto_download", False)
             acc["added_by_user_id"] = s.get("added_by_user_id")
-        return accounts
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+    # Flag accounts still on the broken pre-14 device registration. Done outside the try above:
+    # `_load_accounts_file` never raises (it yields {} on any failure, e.g. a mid-rewrite parse
+    # error while login-external is writing), so a bad file only means "no flags", never a 500.
+    entries = {
+        e.get("AccountId"): e
+        for e in (_load_accounts_file().get("Accounts") or [])
+        if isinstance(e, dict)
+    }
+    for acc in accounts:
+        acc["needs_reauth"] = _needs_reauth(entries.get(acc["account_id"]))
+    return accounts
+
+
+def _load_accounts_file() -> dict:
+    """Read AccountsSettings.json for inspection only. Returns {} on ANY failure (missing file,
+    partial write, bad JSON, non-object root) so callers never have to guard it."""
+    try:
+        data = json.loads((Path(settings.LIBATION_CONFIG) / "AccountsSettings.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _needs_reauth(entry) -> bool:
+    """rmcrackan/Libation#2021: Libation <= 13.x registered its Android device with a serial twice
+    the correct length (40 hex chars; a 14.x registration is 20) and Audible refuses licences to
+    such devices. A 40-hex serial therefore means the account must be re-registered. The serial
+    itself is never returned — only this boolean."""
+    if not isinstance(entry, dict):
+        return False
+    tokens = entry.get("IdentityTokens")
+    if not isinstance(tokens, dict):
+        return False
+    serial = tokens.get("DeviceSerialNumber")
+    if not isinstance(serial, str):
+        return False
+    return re.fullmatch(r"[0-9A-Fa-f]{40}", serial) is not None
 
 
 @router.post("/login/start", response_model=StartLoginResponse)

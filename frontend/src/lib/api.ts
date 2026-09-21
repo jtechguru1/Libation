@@ -112,7 +112,22 @@ export const usersApi = {
 };
 
 // Accounts API
+export interface Account {
+  account_id: string;
+  name: string | null;
+  locale: string;
+  scan_library: boolean;
+  authenticated: boolean;
+  owner_name: string | null;
+  owner_username: string | null;
+  auto_download: boolean;
+  added_by_user_id: number | null;
+  /** Device registration predates Libation 14 (rmcrackan/Libation#2021); must be re-authenticated. */
+  needs_reauth?: boolean;
+}
+
 export const accountsApi = {
+  list: () => api.get<Account[]>("/accounts"),
   reauthenticateAccount: (accountId: string) =>
     api.post(`/accounts/${encodeURIComponent(accountId)}/reauthenticate`),
 };

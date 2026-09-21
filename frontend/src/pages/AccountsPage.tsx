@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, Plus, CheckCircle, ExternalLink,
@@ -7,6 +7,7 @@ import {
 import { api, usersApi, accountsApi, errorText } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/utils";
+import { ACCOUNTS_CHANGED_EVENT, isSnoozed, snoozeKey } from "@/components/ReauthBanner";
 
 interface Account {
   account_id: string;
@@ -18,6 +19,7 @@ interface Account {
   owner_username: string | null;
   auto_download: boolean;
   added_by_user_id: number | null;
+  needs_reauth?: boolean;
 }
 
 type Step = "idle" | "form" | "url" | "completing" | "done";
@@ -94,13 +96,27 @@ export function AccountsPage() {
   // Admin-only: assigning an Audible account to a user, from the account's own row.
   const [allUsers, setAllUsers] = useState<{ id: number; username: string; owner_name?: string | null; audible_account_id?: string | null }[]>([]);
   const [savingOwner, setSavingOwner] = useState<string | null>(null);
+  // Shown after the re-auth modal is cancelled part-way: the account is already gone from
+  // Libation at that point and nothing else on the page says so.
+  const [reauthAbandoned, setReauthAbandoned] = useState("");
+  // Bumped on unsnooze so the "reminder snoozed" badge re-reads localStorage.
+  const [snoozeTick, setSnoozeTick] = useState(0);
+
+  // Accounts whose reminder is currently snoozed in this browser (re-read on every unsnooze).
+  const snoozedIds = useMemo(
+    () => new Set(accounts.filter(a => a.needs_reauth && user && isSnoozed(user.id, a.account_id)).map(a => a.account_id)),
+    [accounts, user, snoozeTick],
+  );
+
+  /** Tell the layout-level ReauthBanner the account list may have changed. */
+  const notifyAccountsChanged = () => window.dispatchEvent(new CustomEvent(ACCOUNTS_CHANGED_EVENT));
 
   const fetchAccounts = () => {
     setLoading(true);
     api.get("/accounts")
       .then(r => setAccounts(r.data))
       .catch(() => setAccounts([]))
-      .finally(() => setLoading(false));
+      .finally(() => { setLoading(false); notifyAccountsChanged(); });
   };
 
   // Admin-only: GET /api/users is behind require_admin, so never call it for a normal user —
@@ -206,6 +222,8 @@ export function AccountsPage() {
     try {
       const { data } = await accountsApi.reauthenticateAccount(accountId);
       setAccounts(prev => prev.filter(a => a.account_id !== accountId));
+      notifyAccountsChanged(); // clears the banner the instant the user acts
+      setReauthAbandoned("");
       setEmail(accountId); // account_id is the Audible email
       setLocale(accountLocale);
       setReauthMode(true);
@@ -266,6 +284,11 @@ export function AccountsPage() {
   };
 
   const resetFlow = () => {
+    if (reauthMode && step !== "done") {
+      setReauthAbandoned(
+        `${email} was removed and not re-added — use Add Account to register it again.`
+      );
+    }
     setStep("idle");
     setEmail("");
     setLocale("us");
@@ -391,6 +414,16 @@ export function AccountsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {reauthAbandoned && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40 px-4 py-3">
+          <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <p className="flex-1 text-sm text-amber-800 dark:text-amber-300">{reauthAbandoned}</p>
+          <button onClick={() => setReauthAbandoned("")} className="text-amber-400 hover:text-amber-600 dark:hover:text-amber-200 shrink-0">
+            <X className="h-4 w-4" />
+          </button>
         </div>
       )}
 
@@ -667,6 +700,31 @@ export function AccountsPage() {
                 </div>
                 <LocaleBadge locale={acc.locale} />
                 <StatusTooltip authenticated={acc.authenticated} />
+                {acc.needs_reauth && (
+                  <span
+                    title="Registered under an older Libation; Audible refuses licences to it until re-authenticated (rmcrackan/Libation#2021)"
+                    className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40 px-2 py-0.5 text-xs font-medium text-amber-800 dark:text-amber-300 shrink-0"
+                  >
+                    <AlertCircle className="h-3 w-3" />
+                    Needs re-authentication
+                    {user && snoozedIds.has(acc.account_id) && (
+                      <>
+                        <span className="font-normal text-amber-600 dark:text-amber-400">· reminder snoozed</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            try { localStorage.removeItem(snoozeKey(user.id, acc.account_id)); } catch { /* private mode etc. */ }
+                            setSnoozeTick(t => t + 1);
+                            notifyAccountsChanged();
+                          }}
+                          className="underline font-normal hover:text-amber-900 dark:hover:text-amber-200"
+                        >
+                          unsnooze
+                        </button>
+                      </>
+                    )}
+                  </span>
+                )}
                 {canScan && (
                   <button
                     onClick={() => handleScanAccount(acc.account_id, acc.name)}

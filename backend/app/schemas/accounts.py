@@ -11,6 +11,9 @@ class AccountResponse(BaseModel):
     owner_username: str | None = None
     auto_download: bool = False
     added_by_user_id: int | None = None
+    # True when the account's Audible device registration predates Libation 14 (rmcrackan/Libation#2021)
+    # and must be re-registered via Re-authenticate. Defaults False so other consumers are untouched.
+    needs_reauth: bool = False
 
 
 class StartLoginRequest(BaseModel):
