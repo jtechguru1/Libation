@@ -9,6 +9,7 @@ import pyotp
 import qrcode
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -116,14 +117,21 @@ def prune_expired_sessions(db: Session) -> int:
 
 
 def enforce_session_cap(db: Session, user_id: int) -> int:
-    """Prune expired rows, then keep only the newest MAX_SESSIONS_PER_USER sessions for this user,
-    deleting any older live ones. Returns the number of live sessions removed by the cap.
+    """Prune expired rows, then keep only the MAX_SESSIONS_PER_USER most-recently-USED sessions for
+    this user, deleting the least-recently-used live ones. Returns the number removed by the cap.
+
+    Eviction is by last activity (`last_used_at`), NOT creation time. A silent token refresh updates
+    `last_used_at` every ~13 minutes but never `created_at`, so a session the user is actively on can
+    be old by creation yet fresh by use. Ordering by creation would evict that live session the
+    moment enough newer logins piled up — logging the user out mid-use, breaking the "This device"
+    match, and forcing yet another login. A brand-new session has `last_used_at = NULL`, so fall back
+    to `created_at` (which is `now` at login) to keep it safe too.
     """
     prune_expired_sessions(db)
     live = (
         db.query(UserSession)
         .filter(UserSession.user_id == user_id)
-        .order_by(UserSession.created_at.desc())
+        .order_by(func.coalesce(UserSession.last_used_at, UserSession.created_at).desc())
         .all()
     )
     if len(live) <= MAX_SESSIONS_PER_USER:

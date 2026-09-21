@@ -1,6 +1,19 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """Serialise a datetime with an explicit UTC offset. The `sessions` table uses a plain
+    `Column(DateTime)`, so a value written as `datetime.now(timezone.utc)` comes back naive and
+    serialises with no offset — which a browser reads as LOCAL time, showing session timestamps
+    five hours out (CST). Everything written here is UTC; stamping UTC restates that, not guesses.
+    (Mirrors downloads.py, whose timestamps were already fixed this way.)"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 class CreateUserRequest(BaseModel):
@@ -49,5 +62,9 @@ class SessionResponse(BaseModel):
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
     is_current: bool = False  # set by the /sessions handler for the caller's own session
+
+    @field_serializer("created_at", "last_used_at", "expires_at")
+    def _ser_dt(self, dt: Optional[datetime], _info) -> Optional[str]:
+        return _utc_iso(dt)
 
     model_config = {"from_attributes": True}
