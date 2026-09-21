@@ -228,9 +228,16 @@ STATIC_DIR = "/app/static"
 if os.path.isdir(STATIC_DIR):
     app.mount("/assets", StaticFiles(directory=f"{STATIC_DIR}/assets"), name="assets")
 
+    # index.html must never be cached: it's the only file whose name isn't content-hashed, so a cached
+    # copy would keep pointing browsers at an old (possibly deleted) bundle after an update. The hashed
+    # files under /assets are safe to cache and get default caching (no header set here).
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
         candidate = Path(STATIC_DIR) / full_path
         if candidate.is_file():
+            if candidate.name == "index.html":
+                return FileResponse(str(candidate), headers=_NO_CACHE)
             return FileResponse(str(candidate))
-        return FileResponse(f"{STATIC_DIR}/index.html")
+        return FileResponse(f"{STATIC_DIR}/index.html", headers=_NO_CACHE)

@@ -24,6 +24,10 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: "UserResponse"
+    # The id of the caller's own session row. The client stores it and marks its "This device" row by
+    # id, so the badge no longer depends on the browser attaching the refresh_token cookie to
+    # GET /api/auth/sessions (some browsers, e.g. hardened Brave profiles, don't).
+    session_id: Optional[int] = None
 
 
 class TwoFactorRequiredResponse(BaseModel):

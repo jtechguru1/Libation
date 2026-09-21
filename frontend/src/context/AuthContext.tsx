@@ -15,7 +15,11 @@ interface AuthContextValue {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (accessToken: string, user: User) => void;
+  // The id of this browser's own session row, returned by login/refresh. SettingsPage uses it to mark
+  // the "This device" row by id, so the badge works even when the browser withholds the refresh_token
+  // cookie from GET /auth/sessions (e.g. hardened Brave profiles).
+  currentSessionId: number | null;
+  login: (accessToken: string, user: User, sessionId?: number | null) => void;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -26,6 +30,7 @@ const ACCESS_TOKEN_REFRESH_MS = 13 * 60 * 1000; // refresh 2 min before 15-min e
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -35,16 +40,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const { data } = await authApi.refresh();
         setAccessToken(data.access_token);
+        if (data.session_id != null) setCurrentSessionId(data.session_id);
       } catch {
         setUser(null);
         setAccessToken(null);
+        setCurrentSessionId(null);
       }
     }, ACCESS_TOKEN_REFRESH_MS);
   }, []);
 
-  const login = useCallback((accessToken: string, userData: User) => {
+  const login = useCallback((accessToken: string, userData: User, sessionId?: number | null) => {
     setAccessToken(accessToken);
     setUser(userData);
+    setCurrentSessionId(sessionId ?? null);
     scheduleRefresh();
     // The re-authentication reminder (ReauthBanner) is dismissable per login, so its dismissal
     // is cleared here rather than in logout(): session expiry nulls the user without calling
@@ -56,6 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try { await authApi.logout(); } catch { /* ignore */ }
     setAccessToken(null);
     setUser(null);
+    setCurrentSessionId(null);
     if (refreshTimer.current) clearInterval(refreshTimer.current);
   }, []);
 
@@ -70,6 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then(({ data }) => {
         setAccessToken(data.access_token);
         setUser(data.user);
+        setCurrentSessionId(data.session_id ?? null);
         scheduleRefresh();
       })
       .catch(() => { /* not logged in */ })
@@ -79,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [scheduleRefresh]);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, currentSessionId, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

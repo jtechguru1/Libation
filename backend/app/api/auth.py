@@ -61,7 +61,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
         temp_token = auth_svc.create_temp_token(user.id)
         return TwoFactorRequiredResponse(temp_token=temp_token)
 
-    raw_refresh = auth_svc.create_session(
+    raw_refresh, session_id = auth_svc.create_session(
         db, user.id,
         user_agent=request.headers.get("user-agent"),
         ip=request.client.host if request.client else None,
@@ -70,6 +70,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     return TokenResponse(
         access_token=auth_svc.create_access_token(user.id),
         user=UserResponse.model_validate(user),
+        session_id=session_id,
     )
 
 
@@ -87,7 +88,7 @@ def verify_2fa(body: TwoFactorRequest, request: Request, response: Response, db:
     if not auth_svc.verify_totp(user.totp_secret, body.code):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA code")
 
-    raw_refresh = auth_svc.create_session(
+    raw_refresh, session_id = auth_svc.create_session(
         db, user.id,
         user_agent=request.headers.get("user-agent"),
         ip=request.client.host if request.client else None,
@@ -96,6 +97,7 @@ def verify_2fa(body: TwoFactorRequest, request: Request, response: Response, db:
     return TokenResponse(
         access_token=auth_svc.create_access_token(user.id),
         user=UserResponse.model_validate(user),
+        session_id=session_id,
     )
 
 
@@ -117,6 +119,7 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     return TokenResponse(
         access_token=auth_svc.create_access_token(user.id),
         user=UserResponse.model_validate(user),
+        session_id=session.id,
     )
 
 

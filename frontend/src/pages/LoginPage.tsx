@@ -33,7 +33,7 @@ export function LoginPage() {
         return;
       }
 
-      login(data.access_token, data.user);
+      login(data.access_token, data.user, data.session_id);
       navigate("/");
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })

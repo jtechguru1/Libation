@@ -335,6 +335,7 @@ interface SessionItem {
 }
 
 function SessionsSection() {
+  const { currentSessionId } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState<number | null>(null);
@@ -415,12 +416,16 @@ function SessionsSection() {
           <p className="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">No active sessions found.</p>
         ) : (
           <ul className="divide-y divide-slate-100 dark:divide-slate-700">
-            {sessions.map(s => (
+            {sessions.map(s => {
+              // Prefer the id match (from login/refresh, cookie-independent); fall back to the
+              // server's cookie-hash flag. Either identifies this browser's own row.
+              const isCurrent = s.id === currentSessionId || s.is_current;
+              return (
               <li key={s.id} className="flex items-center gap-3 py-3">
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center gap-2">
                     {shortUA(s.user_agent)}
-                    {s.is_current && (
+                    {isCurrent && (
                       <span className="inline-flex items-center rounded-full bg-brand-100 dark:bg-brand-900/40 px-2 py-0.5 text-[10px] font-medium text-brand-700 dark:text-brand-400">
                         This device
                       </span>
@@ -432,7 +437,7 @@ function SessionsSection() {
                 </div>
                 {/* The current session isn't revocable here — dropping it would log you out. Use
                     "Revoke all" (which signs everything out) if that's the intent. */}
-                {!s.is_current && (
+                {!isCurrent && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -444,7 +449,8 @@ function SessionsSection() {
                   </Button>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </CardContent>

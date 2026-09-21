@@ -57,7 +57,7 @@ export function TwoFactorPage() {
     setLoading(true);
     try {
       const { data } = await authApi.verify2fa(tempToken, code);
-      login(data.access_token, data.user);
+      login(data.access_token, data.user, data.session_id);
       navigate("/");
     } catch {
       setError("Invalid code. Please try again.");

@@ -79,7 +79,7 @@ def _hash_token(token: str) -> str:
 MAX_SESSIONS_PER_USER = 10
 
 
-def create_session(db: Session, user_id: int, user_agent: str = None, ip: str = None) -> str:
+def create_session(db: Session, user_id: int, user_agent: str = None, ip: str = None) -> tuple[str, int]:
     raw_token = secrets.token_urlsafe(64)
     expires = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
@@ -92,10 +92,15 @@ def create_session(db: Session, user_id: int, user_agent: str = None, ip: str = 
     )
     db.add(session)
     db.commit()
+    # Read the DB-assigned primary key so the caller can hand it to the client, which uses it to mark
+    # its own "This device" row by id (cookie-independent). Captured before enforce_session_cap so the
+    # value survives that cleanup pass.
+    db.refresh(session)
+    session_id = session.id
     # Every session-creating path funnels through here, so cleaning up here covers them all: drop
     # expired rows first (so they don't count toward the cap), then trim this user to the newest N.
     enforce_session_cap(db, user_id)
-    return raw_token
+    return raw_token, session_id
 
 
 def prune_expired_sessions(db: Session) -> int:
