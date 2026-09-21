@@ -29,6 +29,7 @@ from .services.logger import get_logger
 from .models.user import User
 from .config import settings
 from .limiter import limiter
+from .version import APP_VERSION
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -183,7 +184,7 @@ async def lifespan(app: FastAPI):
         logger.info("[shutdown] Background tasks stopped")
 
 
-app = FastAPI(title="Libation API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Libation API", version=APP_VERSION, lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -209,7 +210,7 @@ app.include_router(logs_router.router)
 
 @app.get("/api/health", include_in_schema=False)
 def health():
-    return JSONResponse({"status": "ok", "version": "0.4.0"})
+    return JSONResponse({"status": "ok", "version": APP_VERSION})
 
 
 # Serve React build — must come after API routes

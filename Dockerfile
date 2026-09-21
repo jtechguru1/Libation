@@ -88,6 +88,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
 COPY backend/app ./app
+COPY CHANGELOG.md ./CHANGELOG.md
 
 # Built frontend (served as static files by FastAPI)
 COPY --from=frontend-builder /frontend/dist ./static

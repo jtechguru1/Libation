@@ -5,7 +5,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [Unreleased] — Libation 14.2.2: fixes "Content License denied" on every download
+## [0.5.0] — 2026-09-21 — Libation 14.2.2, download queue, scheduled scans, first-run onboarding
+
+Libation 14.2.2 fixes "Content License denied" on every download. Six further reported issues,
+which turned out to be three defects and three missing features that chained together, plus
+several problems found while verifying the fixes.
+
+### 🔒 Security
+
+- **A default-credential admin account was recreated on every container restart.**
+  `_seed_admin` looked for a user *named* `ADMIN_USERNAME`. Renaming the admin account — which the
+  new onboarding flow tells every operator to do — left no matching row, so a fresh `admin` / `admin`
+  account with **full admin rights** was silently created on each restart. Seeding now happens only
+  when the users table is empty, which is what the documentation always claimed it did.
+  Verified by renaming the admin and restarting three times: no account reappeared.
 
 ### Fixed
 
@@ -32,72 +45,6 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **The Audible login URL could arrive truncated** (Amazon showed "not a functioning page"). The
   v14 login URL is ~940 characters and the backend returned it as soon as its *start* appeared in
   the CLI output; it now waits for the end of the line.
-
-### Added
-
-- **Re-authenticate button** (key icon) on each Audible account card. Removes the account from
-  Libation and immediately starts a fresh sign-in for the same email and locale, so the account is
-  registered with Audible as a new device. Library data and per-account settings (auto-download,
-  owner) are kept. New endpoint `POST /api/accounts/{id}/reauthenticate`.
-- **Re-authenticate reminder.** Accounts registered under Libation 13.x still carry the broken
-  device registration after the upgrade, and nothing told you. `GET /api/accounts` now flags them
-  (`needs_reauth`, from the length of the stored device serial — 40 hex chars on 13.x, 20 on 14.x),
-  an amber bar under the page header lists them with a link to Audible Accounts, and each account
-  card gets a "Needs re-authentication" badge. The bar can be dismissed (comes back at the next
-  sign-in), snoozed per account for 30 days ("Remind me in 30 days"; "unsnooze" on the card), and
-  disappears on its own once every account has been re-authenticated. Nothing is stored on the
-  server.
-
-### Changed
-
-- Libation 14 encrypts stored tokens by default. With no OS secret store in a container it writes a
-  portable `libation-master.key` next to `AccountsSettings.json` in `/config`. Treat it like a
-  password; it lives in the `config` volume and is never part of the image.
-
-## [Unreleased] — Phase 9: download queue, scheduled scans, first-run onboarding
-
-Six reported issues, which turned out to be three defects and three missing features that chained
-together, plus several problems found while verifying the fixes.
-
-### 🔒 Security
-
-- **A default-credential admin account was recreated on every container restart.**
-  `_seed_admin` looked for a user *named* `ADMIN_USERNAME`. Renaming the admin account — which the
-  new onboarding flow tells every operator to do — left no matching row, so a fresh `admin` / `admin`
-  account with **full admin rights** was silently created on each restart. Seeding now happens only
-  when the users table is empty, which is what the documentation always claimed it did.
-  Verified by renaming the admin and restarting three times: no account reappeared.
-
-### Added
-
-- **Serial download queue.** Exactly one book downloads at a time, process-wide, with a configurable
-  pause between books. Audible is liable to flag an account that downloads in bulk simultaneously.
-- **Scheduled library scans.** Configurable interval (default 6h; 15m–24h, or off) so new purchases
-  are discovered without anyone clicking. The schedule is **persisted to disk**, so restarting the
-  container resumes it rather than triggering a fresh scan.
-- **Per-account "Scan Library" button** on the Audible Accounts page. `libationcli scan` accepts
-  positional account IDs, so this scans only that account.
-- **First-run onboarding.** An install still on `admin` / `admin` is taken to a full-screen setup
-  step ahead of every route and cannot reach the app until the credentials are changed. Previously
-  the only hint was a banner inside Settings, which a new user has no reason to open.
-- **Automation settings** (`GET`/`PUT /api/settings/automation`, admin-only) plus an Automation card
-  in Settings: scan interval and pause-between-downloads.
-- **Back-to-back scan guard.** A manual scan within 10 minutes of the last one asks for confirmation
-  and explains the risk, with an explicit "Scan anyway" override. Repeated scanning is what gets an
-  account rate-limited, and a user clicking refresh has no way to know that.
-- **Queue stand-down.** Three consecutive download failures pause the queue for 30 minutes. Waiting
-  books stay queued and resume automatically, so a rate-limited account is not hammered further.
-- **Timezone support.** `tzdata` in the image and a `TZ` environment variable (compose + Unraid
-  template). Without it the container was pinned to UTC with nothing saying so.
-- **Owner assignment on the Audible Accounts page.** Admins can set which user owns an account, and
-  that user's display name, from the account's own row — previously only possible in
-  Settings → User Management, keyed by user.
-- **Liberate page refreshes itself** when a scan completes, with a banner naming the number of new
-  books. Scans can now happen unattended, so the page can no longer assume the library only changes
-  when the user acts.
-
-### Fixed
-
 - **"Failed to start bulk download" — Download All had never worked on this branch.**
   `download_all` was declared `def` rather than `async def`; FastAPI runs sync handlers in a
   threadpool with no event loop, so its `asyncio.create_task` raised
@@ -130,6 +77,55 @@ together, plus several problems found while verifying the fixes.
   guaranteed to return 403.
 - **Bulk queueing failed silently.** The multi-select loop broke on the first error with no message;
   it now reports how many were queued, which book stopped it, and why.
+
+### Added
+
+- **Re-authenticate button** (key icon) on each Audible account card. Removes the account from
+  Libation and immediately starts a fresh sign-in for the same email and locale, so the account is
+  registered with Audible as a new device. Library data and per-account settings (auto-download,
+  owner) are kept. New endpoint `POST /api/accounts/{id}/reauthenticate`.
+- **Re-authenticate reminder.** Accounts registered under Libation 13.x still carry the broken
+  device registration after the upgrade, and nothing told you. `GET /api/accounts` now flags them
+  (`needs_reauth`, from the length of the stored device serial — 40 hex chars on 13.x, 20 on 14.x),
+  an amber bar under the page header lists them with a link to Audible Accounts, and each account
+  card gets a "Needs re-authentication" badge. The bar can be dismissed (comes back at the next
+  sign-in), snoozed per account for 30 days ("Remind me in 30 days"; "unsnooze" on the card), and
+  disappears on its own once every account has been re-authenticated. Nothing is stored on the
+  server.
+- **Serial download queue.** Exactly one book downloads at a time, process-wide, with a configurable
+  pause between books. Audible is liable to flag an account that downloads in bulk simultaneously.
+- **Scheduled library scans.** Configurable interval (default 6h; 15m–24h, or off) so new purchases
+  are discovered without anyone clicking. The schedule is **persisted to disk**, so restarting the
+  container resumes it rather than triggering a fresh scan.
+- **Per-account "Scan Library" button** on the Audible Accounts page. `libationcli scan` accepts
+  positional account IDs, so this scans only that account.
+- **First-run onboarding.** An install still on `admin` / `admin` is taken to a full-screen setup
+  step ahead of every route and cannot reach the app until the credentials are changed. Previously
+  the only hint was a banner inside Settings, which a new user has no reason to open.
+- **Automation settings** (`GET`/`PUT /api/settings/automation`, admin-only) plus an Automation card
+  in Settings: scan interval and pause-between-downloads.
+- **Back-to-back scan guard.** A manual scan within 10 minutes of the last one asks for confirmation
+  and explains the risk, with an explicit "Scan anyway" override. Repeated scanning is what gets an
+  account rate-limited, and a user clicking refresh has no way to know that.
+- **Queue stand-down.** Three consecutive download failures pause the queue for 30 minutes. Waiting
+  books stay queued and resume automatically, so a rate-limited account is not hammered further.
+- **Timezone support.** `tzdata` in the image and a `TZ` environment variable (compose + Unraid
+  template). Without it the container was pinned to UTC with nothing saying so.
+- **Owner assignment on the Audible Accounts page.** Admins can set which user owns an account, and
+  that user's display name, from the account's own row — previously only possible in
+  Settings → User Management, keyed by user.
+- **Liberate page refreshes itself** when a scan completes, with a banner naming the number of new
+  books. Scans can now happen unattended, so the page can no longer assume the library only changes
+  when the user acts.
+- **"What's new" in Settings → About (v0.5.0).** The About card now shows the web UI version
+  alongside the installed LibationCLI version, and a new "What's new" panel renders this changelog
+  in place — the current release expanded, older releases collapsed.
+
+### Changed
+
+- Libation 14 encrypts stored tokens by default. With no OS secret store in a container it writes a
+  portable `libation-master.key` next to `AccountsSettings.json` in `/config`. Treat it like a
+  password; it lives in the `config` volume and is never part of the image.
 
 ### Removed
 

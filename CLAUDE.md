@@ -91,7 +91,9 @@ downloads many books simultaneously.
   auto-download could not fire on its own.
 
 ## Version endpoint (`backend/app/api/updates.py`)
-- `GET /api/updates/version` — returns installed CLI version (parsed from `libationcli --version`); read-only, no GitHub polling
+- `backend/app/version.py` — single source of truth for the web UI's own version, `APP_VERSION`. Imported by `main.py` (FastAPI `app` title/version, `/api/health`) and by `updates.py`.
+- `GET /api/updates/version` — returns `{"cli_version": ..., "app_version": ...}`. `cli_version` is the installed CLI version (parsed from `libationcli --version`); `app_version` is `version.APP_VERSION`. Read-only, no GitHub polling.
+- `GET /api/updates/changelog` — same auth dependency (`get_current_user`) as `/version`. Returns `{"markdown": <text>, "available": bool}`, reading `CHANGELOG.md` from `/app/CHANGELOG.md` (image) or the repo root (local dev) — never 500s; missing file returns `{"markdown": "", "available": false}`. Backs the Settings → About "What's new" viewer.
 - The in-container self-update mechanism was removed because it is architecturally incompatible with LibationBridge: installing a new `.deb` replaces `/usr/lib/libation/*.dll` but leaves the bridge binary (compiled against the old DLL versions) unchanged, causing runtime `MissingMethodException` or container death on restart. To update LibationCLI, bump `LIBATION_VERSION` in the Dockerfile and rebuild the image.
 
 ## Entrypoint restart loop (`docker-entrypoint.sh`)
@@ -232,7 +234,7 @@ docker compose up --build
 - `unraid-template.xml` — Unraid Community Applications template (PUID=99, PGID=100 defaults for Unraid)
 
 ## Health check
-- `GET /api/health` — public endpoint returning `{"status": "ok", "version": "0.4.0"}`
+- `GET /api/health` — public endpoint returning `{"status": "ok", "version": "0.5.0"}` (from `backend/app/version.py`)
 - Dockerfile HEALTHCHECK uses `/api/health` instead of `/api/auth/me`
 
 ## Phase history
@@ -268,6 +270,7 @@ docker compose up --build
   - **Restart safety:** interrupted `running` downloads are requeued rather than failed, so restarting mid-batch no longer discards the rest of the queue.
 - **Phase 8 Extended** (complete): Owner name editable input added directly to AccountsPage for accounts the logged-in user added (`added_by_user_id === user.id`); saves via `PATCH /api/auth/me` on blur/Enter; amber banner shown when `owner_name` is unset. "Purchased" filter tab added to Liberate page between All and Audible Plus; filters on `LibraryBooks.IsAudiblePlus=0` in both `get_liberate_books()` and `get_liberate_book_ids()`.
 - **Phase 10** (complete): "Re-authenticate" on the Accounts page. Audible now refuses licences to Libation's old device registration (rmcrackan/Libation#2021); upstream's fix is remove-and-re-add the account. `POST /api/accounts/{account_id}/reauthenticate` does both steps as one call — same auth as `DELETE`, removes the entry from `AccountsSettings.json` via a `_remove_account_entry` helper shared with `delete_account`, then calls `cli.start_login` and returns a `StartLoginResponse` so the frontend can drive the existing OAuth modal straight to "open login URL" → paste redirect. `audible_account_settings` DB row is left alone on purpose. `AccountsPage.tsx` gets a `KeyRound` icon button next to the remove control, a `window.confirm` warning, and a read-only email/locale banner while the reused login modal is in re-auth mode (`reauthMode`); `accountsApi.reauthenticateAccount` added to `api.ts`.
+- **Phase 11 — "What's new" changelog viewer** (complete): The web UI gets its own real version number, `APP_VERSION` in the new `backend/app/version.py` (currently `0.5.0`), used by `/api/health` and the FastAPI app version. `GET /api/updates/version` gains `app_version` alongside `cli_version`. New `GET /api/updates/changelog` (same auth as `/version`) reads `CHANGELOG.md` — `/app/CHANGELOG.md` in the image (Dockerfile now copies it next to `backend/app`), the repo root in local dev — and never 500s on a missing file. Settings → About (`AboutSection` in `SettingsPage.tsx`) now shows `Web UI v<app_version> · LibationCli v<cli_version>` and, below it, a "What's new" panel that fetches the changelog, splits it on `\n## ` release headings, renders the newest release expanded and every older one collapsed behind a native `<details>`/`<summary>`, and scrolls internally past `60vh`. Rendered with `react-markdown` + `remark-gfm`, Tailwind-styled (dark mode included) to match the rest of Settings. The old "rebuild the Docker image to update LibationCLI" hint text was removed from the card — it's a maintainer instruction, not something an end user of the image needs to see.
 
 ## Pre-push sanitization (REQUIRED before any `git push`)
 

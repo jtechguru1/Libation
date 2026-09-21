@@ -132,6 +132,15 @@ export const accountsApi = {
     api.post(`/accounts/${encodeURIComponent(accountId)}/reauthenticate`),
 };
 
+// Updates API — version info + changelog for Settings -> About
+export const updatesApi = {
+  getVersion: () =>
+    api.get<{ cli_version: string | null; app_version: string }>("/updates/version"),
+
+  getChangelog: () =>
+    api.get<{ markdown: string; available: boolean }>("/updates/changelog"),
+};
+
 // Settings API
 export const settingsApi = {
   getLibation: () =>

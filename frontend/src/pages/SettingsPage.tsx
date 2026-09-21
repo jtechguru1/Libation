@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ShieldCheck, ShieldOff, KeyRound, Loader2, Users, MonitorSmartphone,
   Sliders, Trash2, Plus, RefreshCw, Crown, BookOpen, ShieldAlert,
@@ -6,7 +8,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/AuthContext";
-import { api, authApi, usersApi, settingsApi } from "@/lib/api";
+import { api, authApi, usersApi, settingsApi, updatesApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -1058,15 +1060,102 @@ function UserManagementSection() {
 
 // ── About Section ────────────────────────────────────────────────────────────
 
+/** Renders one release's markdown body with Tailwind classes matching the rest of Settings. */
+function ChangelogMarkdown({ markdown }: { markdown: string }) {
+  return (
+    <div className="text-sm text-slate-600 dark:text-slate-300">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h3: ({ children }) => (
+            <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mt-3 mb-1 first:mt-0">{children}</h4>
+          ),
+          h4: ({ children }) => (
+            <h5 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mt-2 mb-1">{children}</h5>
+          ),
+          p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
+          ul: ({ children }) => <ul className="list-disc pl-5 space-y-1.5 mb-2">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal pl-5 space-y-1.5 mb-2">{children}</ol>,
+          li: ({ children }) => <li>{children}</li>,
+          strong: ({ children }) => <strong className="font-semibold text-slate-800 dark:text-slate-100">{children}</strong>,
+          em: ({ children }) => <em className="italic">{children}</em>,
+          code: ({ children }) => (
+            <code className="px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[0.8em] font-mono text-slate-700 dark:text-slate-300">
+              {children}
+            </code>
+          ),
+          a: ({ href, children }) => (
+            <a href={href} target="_blank" rel="noreferrer" className="text-brand-600 dark:text-brand-400 hover:underline">
+              {children}
+            </a>
+          ),
+          hr: () => <hr className="border-slate-100 dark:border-slate-700 my-3" />,
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+/**
+ * Splits the changelog on release headings (`\n## `), dropping the leading "# Changelog" title
+ * and intro lines. The newest release renders expanded; every older one collapses into a
+ * <details> with its heading as the summary.
+ */
+function ChangelogViewer({ markdown }: { markdown: string }) {
+  const sections = markdown.split(/\n## /).slice(1).map(s => s.trim());
+  if (sections.length === 0) return null;
+
+  return (
+    <div className="max-h-[60vh] overflow-y-auto pr-1 space-y-3">
+      {sections.map((section, i) => {
+        const newlineIdx = section.indexOf("\n");
+        const heading = (newlineIdx === -1 ? section : section.slice(0, newlineIdx)).trim();
+        const body = newlineIdx === -1 ? "" : section.slice(newlineIdx + 1).trim();
+
+        if (i === 0) {
+          return (
+            <div key={heading}>
+              <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200 mb-1">{heading}</h4>
+              <ChangelogMarkdown markdown={body} />
+            </div>
+          );
+        }
+
+        return (
+          <details key={heading} className="border-t border-slate-100 dark:border-slate-700 pt-3">
+            <summary className="cursor-pointer text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 select-none">
+              {heading}
+            </summary>
+            <div className="mt-2">
+              <ChangelogMarkdown markdown={body} />
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function AboutSection() {
   const [cliVersion, setCliVersion] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [changelog, setChangelog] = useState("");
+  const [changelogAvailable, setChangelogAvailable] = useState(false);
+  const [changelogLoading, setChangelogLoading] = useState(true);
 
   useEffect(() => {
-    api.get("/updates/version")
-      .then(({ data }) => setCliVersion(data.cli_version))
+    updatesApi.getVersion()
+      .then(({ data }) => { setCliVersion(data.cli_version); setAppVersion(data.app_version); })
       .catch(() => {})
       .finally(() => setLoading(false));
+
+    updatesApi.getChangelog()
+      .then(({ data }) => { setChangelog(data.markdown); setChangelogAvailable(data.available); })
+      .catch(() => {})
+      .finally(() => setChangelogLoading(false));
   }, []);
 
   return (
@@ -1076,23 +1165,30 @@ function AboutSection() {
           <Info className="h-5 w-5 text-brand-600" />
           About
         </CardTitle>
-        <CardDescription>LibationCLI version information.</CardDescription>
+        <CardDescription>Version information and what's changed.</CardDescription>
       </CardHeader>
       <CardContent>
         <dl className="text-sm">
           <div className="flex items-center justify-between py-2.5">
-            <dt className="text-slate-500 dark:text-slate-400">Installed CLI version</dt>
+            <dt className="text-slate-500 dark:text-slate-400">Version</dt>
             <dd className="font-mono font-semibold text-slate-800 dark:text-slate-200">
               {loading
                 ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
-                : cliVersion ? `v${cliVersion}` : "Unknown"}
+                : `Web UI v${appVersion ?? "?"} · LibationCli ${cliVersion ? `v${cliVersion}` : "Unknown"}`}
             </dd>
           </div>
         </dl>
-        <p className="text-xs text-slate-400 dark:text-slate-500 mt-3">
-          To update LibationCLI, rebuild the Docker image with a newer{" "}
-          <code className="font-mono">LIBATION_VERSION</code>.
-        </p>
+
+        {changelogLoading ? (
+          <div className="flex justify-center py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
+          </div>
+        ) : changelogAvailable ? (
+          <div className="mt-3 border-t border-slate-100 dark:border-slate-700 pt-3">
+            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">What's new</h3>
+            <ChangelogViewer markdown={changelog} />
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );
