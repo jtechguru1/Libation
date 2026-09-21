@@ -331,6 +331,7 @@ interface SessionItem {
   expires_at: string;
   user_agent: string | null;
   ip_address: string | null;
+  is_current: boolean;
 }
 
 function SessionsSection() {
@@ -417,20 +418,31 @@ function SessionsSection() {
             {sessions.map(s => (
               <li key={s.id} className="flex items-center gap-3 py-3">
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{shortUA(s.user_agent)}</p>
+                  <p className="text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                    {shortUA(s.user_agent)}
+                    {s.is_current && (
+                      <span className="inline-flex items-center rounded-full bg-brand-100 dark:bg-brand-900/40 px-2 py-0.5 text-[10px] font-medium text-brand-700 dark:text-brand-400">
+                        This device
+                      </span>
+                    )}
+                  </p>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     {s.ip_address ?? "IP unknown"} · Last used {fmt(s.last_used_at)}
                   </p>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => revoke(s.id)}
-                  loading={revoking === s.id}
-                  className="shrink-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                {/* The current session isn't revocable here — dropping it would log you out. Use
+                    "Revoke all" (which signs everything out) if that's the intent. */}
+                {!s.is_current && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => revoke(s.id)}
+                    loading={revoking === s.id}
+                    className="shrink-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
@@ -1184,10 +1196,17 @@ function AboutSection() {
             <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
           </div>
         ) : changelogAvailable ? (
-          <div className="mt-3 border-t border-slate-100 dark:border-slate-700 pt-3">
-            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">What's new</h3>
-            <ChangelogViewer markdown={changelog} />
-          </div>
+          // The whole "What's new" block is collapsed by default (no `open` attr): the newest
+          // release is hidden until the user expands, so Settings → About stays compact. The version
+          // line above stays visible; per-release collapse of older versions lives inside the viewer.
+          <details className="mt-3 border-t border-slate-100 dark:border-slate-700 pt-3">
+            <summary className="cursor-pointer text-sm font-semibold text-slate-700 dark:text-slate-200 select-none hover:text-slate-900 dark:hover:text-white">
+              What's new
+            </summary>
+            <div className="mt-2">
+              <ChangelogViewer markdown={changelog} />
+            </div>
+          </details>
         ) : null}
       </CardContent>
     </Card>

@@ -48,5 +48,6 @@ class SessionResponse(BaseModel):
     expires_at: datetime
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
+    is_current: bool = False  # set by the /sessions handler for the caller's own session
 
     model_config = {"from_attributes": True}

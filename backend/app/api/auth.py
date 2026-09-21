@@ -248,8 +248,19 @@ def change_username(
 
 
 @router.get("/sessions", response_model=list[SessionResponse])
-def list_sessions(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
-    return auth_svc.get_sessions_for_user(db, current_user.id)
+def list_sessions(request: Request, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    sessions = auth_svc.get_sessions_for_user(db, current_user.id)
+    # Flag the caller's own session so the UI can badge "This device". The request carries the
+    # refresh_token cookie; hashing it the same way create_session does identifies the matching row.
+    # No cookie (e.g. bearer-only call) simply means every row is is_current=False — never an error.
+    raw_token = request.cookies.get(COOKIE_NAME)
+    current_hash = auth_svc._hash_token(raw_token) if raw_token else None
+    for s in sessions:
+        s.is_current = current_hash is not None and s.refresh_token_hash == current_hash
+    # Put the current device first; get_sessions_for_user already orders by last_used_at desc and
+    # Python's sort is stable, so that ordering is preserved within each group.
+    sessions.sort(key=lambda s: not s.is_current)
+    return sessions
 
 
 @router.delete("/sessions/{session_id}", response_model=MessageResponse)

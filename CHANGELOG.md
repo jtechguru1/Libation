@@ -77,6 +77,9 @@ several problems found while verifying the fixes.
   guaranteed to return 403.
 - **Bulk queueing failed silently.** The multi-select loop broke on the first error with no message;
   it now reports how many were queued, which book stopped it, and why.
+- **The Active Sessions list grew without bound** (expired rows were never pruned, no per-user cap);
+  expired sessions are now cleaned on login and startup, and each user keeps at most 10 most-recent
+  sessions.
 
 ### Added
 
@@ -120,9 +123,14 @@ several problems found while verifying the fixes.
 - **"What's new" in Settings → About (v0.5.0).** The About card now shows the web UI version
   alongside the installed LibationCLI version, and a new "What's new" panel renders this changelog
   in place — the current release expanded, older releases collapsed.
+- **Active Sessions now marks your current device.** The session list flags the row you're signed in
+  from with a "This device" badge, sorts it first, and hides its revoke button (dropping it would log
+  you out — use "Revoke all" for that).
 
 ### Changed
 
+- The "What's new" changelog in Settings → About is now collapsed by default; the version line stays
+  visible and the panel expands on click.
 - Libation 14 encrypts stored tokens by default. With no OS secret store in a container it writes a
   portable `libation-master.key` next to `AccountsSettings.json` in `/config`. Treat it like a
   password; it lives in the `config` volume and is never part of the image.

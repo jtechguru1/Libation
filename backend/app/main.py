@@ -24,7 +24,7 @@ from .api import settings as settings_router
 from .api import liberate as liberate_router
 from .api import updates as updates_router
 from .api import logs as logs_router
-from .services.auth import hash_password, get_user_by_username
+from .services.auth import hash_password, get_user_by_username, prune_expired_sessions
 from .services.logger import get_logger
 from .models.user import User
 from .config import settings
@@ -141,6 +141,16 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         _migrate_db(db)
         _seed_admin(db)
+        # Clear out sessions that expired while the container was down so the table doesn't carry
+        # dead rows between restarts (logins already prune, but a long-idle install may never log in).
+        # Wrapped so a prune failure logs and never blocks startup.
+        try:
+            pruned = prune_expired_sessions(db)
+            if pruned:
+                print(f"[Libation] Pruned {pruned} expired session(s) at startup")
+                logger.info("[startup] Pruned %d expired session(s)", pruned)
+        except Exception as exc:
+            logger.error("[startup] Failed to prune expired sessions: %s", exc, exc_info=True)
         now = datetime.now(timezone.utc)
         stuck_scans = db.query(Scan).filter(Scan.status == "running").all()
         if stuck_scans:

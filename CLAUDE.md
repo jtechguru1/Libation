@@ -34,13 +34,22 @@ A Dockerized web application that wraps the LibationCli audiobook manager with a
 - **2FA**: TOTP via `pyotp`, optional per user, toggled in Settings
 - **Session persistence**: On page load, silently calls `/api/auth/refresh` using the cookie
 - **Auto-refresh**: Timer in `AuthContext` refreshes access token 2 min before expiry
+- **Session pruning + per-user cap** (`backend/app/services/auth.py`): the `sessions` table used to
+  grow without bound — every login inserts a row (worse here because direct-IP, Tailscale and proxy
+  origins each count as a separate login) and nothing ever removed one. `prune_expired_sessions(db)`
+  bulk-deletes rows past `expires_at`; `enforce_session_cap(db, user_id)` prunes expired first, then
+  keeps only the newest `MAX_SESSIONS_PER_USER = 10` per user. `create_session` calls the cap on
+  every login (covers all session-creating paths), and `main.py`'s startup lifespan runs one prune
+  (failure logs, never crashes startup). **Session lifetime is unchanged at 60 days**
+  (`REFRESH_TOKEN_EXPIRE_DAYS`); the cookie/refresh flow is untouched. SQLite drops tzinfo on the
+  `DateTime` column, so the bulk prune compares against a naive `datetime.utcnow()`.
 
 ### Auth API endpoints (`backend/app/api/auth.py`)
 - `GET /api/auth/default-credentials` — returns `{"using_default_credentials": bool}`; compares logged-in user's username against `ADMIN_USERNAME` env var and verifies stored hash still matches `ADMIN_PASSWORD`. Used by Settings page to show the amber warning banner.
 - `PATCH /api/auth/me` — free-form dict body; updates `audible_account_id` and/or `owner_name` on the logged-in user
 - `POST /api/auth/change-username` — body: `{new_username, current_password}`; validates ≥3 chars, 409 on conflict; returns updated `UserResponse`
 - `POST /api/auth/change-password` — body: `{current_password, new_password}`; revokes all sessions on success
-- `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}` / `DELETE /api/auth/sessions` — session management for the logged-in user
+- `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}` / `DELETE /api/auth/sessions` — session management for the logged-in user. The list hashes the request's `refresh_token` cookie and sets `is_current: bool` on the matching row (missing cookie → all false), then sorts the caller's own session first; the UI badges it "This device" and hides its per-row revoke button.
 
 ## Database (SQLite at `/data/app.db`)
 - `users`: id, username, hashed_password (bcrypt), totp_secret, totp_enabled, is_active, is_admin, permissions (JSON), download_cap (INTEGER), audible_account_id (TEXT), owner_name (TEXT), created_at

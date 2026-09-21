@@ -70,6 +70,14 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# The `sessions` table grew without bound: every login inserts a row and, until now, nothing ever
+# removed one. The same person reaches this app over several origins (direct IP, Tailscale hostname,
+# a reverse proxy) and each origin is a separate login, so the row count climbed steadily. Two
+# mechanisms keep it in check — expired rows are pruned, and each user keeps only the newest N live
+# sessions. Neither changes how long a session lasts (REFRESH_TOKEN_EXPIRE_DAYS stays 60).
+MAX_SESSIONS_PER_USER = 10
+
+
 def create_session(db: Session, user_id: int, user_agent: str = None, ip: str = None) -> str:
     raw_token = secrets.token_urlsafe(64)
     expires = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
@@ -83,7 +91,48 @@ def create_session(db: Session, user_id: int, user_agent: str = None, ip: str = 
     )
     db.add(session)
     db.commit()
+    # Every session-creating path funnels through here, so cleaning up here covers them all: drop
+    # expired rows first (so they don't count toward the cap), then trim this user to the newest N.
+    enforce_session_cap(db, user_id)
     return raw_token
+
+
+def prune_expired_sessions(db: Session) -> int:
+    """Bulk-delete every session whose expiry has passed. Returns the number of rows removed.
+
+    SQLite's DateTime column stores naive UTC strings — tzinfo is dropped on write, which is exactly
+    why validate_refresh_token re-attaches timezone.utc when it reads a single row back. A bulk query
+    can't do that per-row, so it compares against a naive UTC datetime (datetime.utcnow()) to match
+    the naive values in the column.
+    """
+    cutoff = datetime.utcnow()
+    deleted = (
+        db.query(UserSession)
+        .filter(UserSession.expires_at < cutoff)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return deleted
+
+
+def enforce_session_cap(db: Session, user_id: int) -> int:
+    """Prune expired rows, then keep only the newest MAX_SESSIONS_PER_USER sessions for this user,
+    deleting any older live ones. Returns the number of live sessions removed by the cap.
+    """
+    prune_expired_sessions(db)
+    live = (
+        db.query(UserSession)
+        .filter(UserSession.user_id == user_id)
+        .order_by(UserSession.created_at.desc())
+        .all()
+    )
+    if len(live) <= MAX_SESSIONS_PER_USER:
+        return 0
+    stale = live[MAX_SESSIONS_PER_USER:]
+    for s in stale:
+        db.delete(s)
+    db.commit()
+    return len(stale)
 
 
 def validate_refresh_token(db: Session, raw_token: str) -> Optional[UserSession]:
