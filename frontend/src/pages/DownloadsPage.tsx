@@ -290,7 +290,7 @@ export function DownloadsPage() {
       )}
 
       {/* Filter pills — same tab row as the Liberate page, three states with live counts. */}
-      <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1 w-fit flex-wrap">
+      <div className="flex gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1 w-fit flex-wrap">
         {PILLS.map(p => (
           <button
             key={p.key}
@@ -299,7 +299,7 @@ export function DownloadsPage() {
               "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
               pill === p.key
                 ? "bg-brand-600 text-white"
-                : "text-slate-500 hover:text-slate-700"
+                : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
             )}
           >
             {p.label} ({p.count})

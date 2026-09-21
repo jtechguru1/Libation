@@ -426,7 +426,7 @@ function SessionsSection() {
                   <p className="text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center gap-2">
                     {shortUA(s.user_agent)}
                     {isCurrent && (
-                      <span className="inline-flex items-center rounded-full bg-brand-100 dark:bg-brand-900/40 px-2 py-0.5 text-[10px] font-medium text-brand-700 dark:text-brand-400">
+                      <span className="inline-flex items-center rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-semibold text-white">
                         This device
                       </span>
                     )}
