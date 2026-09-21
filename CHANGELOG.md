@@ -80,9 +80,22 @@ several problems found while verifying the fixes.
 - **The Active Sessions list grew without bound** (expired rows were never pruned, no per-user cap);
   expired sessions are now cleaned on login and startup, and each user keeps at most 10 most-recent
   sessions.
+- **Duplicate "Failed" rows piled up for one book.** The queue's "already present" guard only checked
+  for `queued`/`running` rows, so a still-not-downloaded book that kept failing got a brand-new `error`
+  row on every automatic scan (observed: two rows for the same ASIN, one with no title). Now
+  `enqueue_book` reuses an existing `error` row (resets it to `queued`) instead of inserting a second;
+  a successful download deletes any leftover `error` rows for the same book; and the automatic
+  post-scan auto-download skips any book that already has an `error` row, so a licence-denied book is
+  no longer re-attempted on every scan. Manual and bulk downloads can still retry a failed book — the
+  user re-authenticates, then retries deliberately.
 
 ### Added
 
+- **Downloads filter pills.** The Downloads page now has a three-pill filter row — **Downloading**,
+  **Downloaded**, **Failed** — each showing a live count, replacing the old stacked sections. It opens
+  on Downloading every time.
+- **Clear all failed.** A one-click button on the Failed pill (with a confirm) removes every failed
+  download at once, backed by a new `DELETE /api/downloads/failed` endpoint.
 - **Re-authenticate button** (key icon) on each Audible account card. Removes the account from
   Libation and immediately starts a fresh sign-in for the same email and locale, so the account is
   registered with Audible as a new device. Library data and per-account settings (auto-download,

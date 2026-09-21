@@ -56,16 +56,43 @@ def enqueue_book(book_id: str, user_id: int, book_title: str | None = None) -> b
     """Add one book to the download queue. Returns False if it is already queued or running.
 
     Every path that wants a book downloaded goes through here — manual, bulk and auto-download — so
-    the duplicate guard and the serial queue apply uniformly. Nothing here starts a download; the
-    single `_download_worker` does that, one book at a time.
+    the duplicate guard and the serial queue apply uniformly. If the only existing row for this book
+    is a FAILED (`error`) one, that row is reused (reset to `queued`) rather than duplicated, so a
+    retry never leaves two rows for the same ASIN. Nothing here starts a download; the single
+    `_download_worker` does that, one book at a time.
     """
     with SessionLocal() as db:
-        existing = db.query(Download).filter(
+        active = db.query(Download).filter(
             Download.book_id == book_id,
             Download.status.in_(["queued", "running"]),
         ).first()
-        if existing:
+        if active:
             return False
+
+        # Reuse a prior FAILED row instead of inserting a second one. The old code only checked for
+        # queued/running rows, so a book still stuck at `error` got a brand-new error row on every
+        # retry — observed as duplicate "Failed" entries for the same ASIN. Flip the existing row
+        # back to `queued`: it re-enters the SERIAL queue at the back (the worker picks queued rows
+        # oldest-first) rather than running immediately. Matched by book_id — the ASIN is the book's
+        # identity; book_title is display-only and may be null.
+        failed = (
+            db.query(Download)
+            .filter(Download.book_id == book_id, Download.status == "error")
+            .order_by(Download.id.desc())
+            .first()
+        )
+        if failed:
+            failed.status = "queued"
+            failed.progress = 0
+            failed.error_message = None
+            failed.user_id = user_id
+            failed.started_at = None
+            failed.completed_at = None
+            if book_title:
+                failed.book_title = book_title
+            db.commit()
+            return True
+
         db.add(Download(
             book_id=book_id,
             book_title=book_title,
@@ -117,13 +144,27 @@ async def _auto_download_if_enabled() -> None:
             logger.error("[auto-download] Could not read opted-in accounts: %s", exc, exc_info=True)
             return
 
+    # Skip any book that currently has a FAILED row. enqueue_book (4a) would happily reuse an error
+    # row, but the AUTOMATIC path must NOT: a licence-denied book fails on every scan, so re-queuing
+    # it each time would hammer Audible and churn the Failed list endlessly. The user re-authenticates
+    # and retries deliberately — manual and bulk downloads still reach enqueue_book and CAN retry a
+    # failed book. Build the set once so the enqueue loop below is a cheap membership check.
+    with SessionLocal() as db:
+        failed_ids = {
+            r.book_id
+            for r in db.query(Download.book_id).filter(Download.status == "error").all()
+        }
+
     total_queued = 0
     for account_id in opted_in:
         book_ids = libation_svc.get_liberate_book_ids(
             filter_status="not_liberated",
             account_id=account_id,
         )
-        queued = sum(1 for book_id in book_ids if enqueue_book(book_id, admin_id))
+        queued = sum(
+            1 for book_id in book_ids
+            if book_id not in failed_ids and enqueue_book(book_id, admin_id)
+        )
         total_queued += queued
         logger.info("[auto-download] Account %s: %d un-downloaded book(s), %d newly queued",
                     account_id, len(book_ids), queued)
@@ -333,6 +374,17 @@ async def _run_download(download_id: int, book_id: str) -> None:
             if exit_code != 0:
                 dl.error_message = _summarize_error(output)
             db.commit()
+
+            # A later success supersedes any earlier failure for the same book, so drop stale `error`
+            # rows for this ASIN once it downloads cleanly — otherwise the book keeps showing under
+            # Failed even though it is now downloaded. Matched by book_id because book_title may be
+            # blank. The just-completed row is `complete`, so it is not touched.
+            if exit_code == 0:
+                db.query(Download).filter(
+                    Download.book_id == book_id,
+                    Download.status == "error",
+                ).delete()
+                db.commit()
 
 
 _LAST_SCAN_KEY = "last_scheduled_scan_at"
@@ -594,6 +646,23 @@ def get_download(
     if not dl:
         raise HTTPException(status_code=404, detail="Download not found")
     return dl
+
+
+@router.delete("/failed", status_code=204)
+def clear_failed_downloads(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Delete every failed (`error`) download row in one call.
+
+    Same auth as removing a single error row: signed-in, no special permission. `_require_permission`
+    only guards deleting COMPLETE downloads (a successful artifact); clearing failures just tidies the
+    list. Declared BEFORE `/{download_id}` so the literal path `failed` is matched here instead of
+    being routed into the int `download_id` param (which would 422).
+    """
+    db.query(Download).filter(Download.status == "error").delete()
+    db.commit()
+    return None
 
 
 @router.delete("/{download_id}", status_code=204)

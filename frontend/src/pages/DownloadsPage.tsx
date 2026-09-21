@@ -35,6 +35,19 @@ function StatusIcon({ status }: { status: DownloadItem["status"] }) {
   return <Download className="h-4 w-4 text-slate-400" />;
 }
 
+type Pill = "downloading" | "downloaded" | "failed";
+
+function EmptyPill({ text }: { text: string }) {
+  return (
+    <div className="flex flex-col items-center py-16 text-center">
+      <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 mb-4">
+        <Headphones className="h-7 w-7 text-slate-300" />
+      </div>
+      <p className="text-sm font-medium text-slate-600">{text}</p>
+    </div>
+  );
+}
+
 function BookThumb({ bookId }: { bookId: string }) {
   const [failed, setFailed] = useState(false);
   if (failed) return <div className="h-[5.625rem] w-[5.625rem] rounded shrink-0 bg-slate-100 flex items-center justify-center"><Headphones className="h-3.5 w-3.5 text-slate-300" /></div>;
@@ -74,6 +87,8 @@ export function DownloadsPage() {
     message: string; minutes_ago: number; cooldown_minutes: number;
   } | null>(null);
   const [loadingDownloads, setLoadingDownloads] = useState(true);
+  // Always defaults to "Downloading" on every page load — deliberately not persisted or auto-picked.
+  const [pill, setPill] = useState<Pill>("downloading");
 
   const fetchDownloads = useCallback(() => {
     api.get("/downloads")
@@ -154,11 +169,21 @@ export function DownloadsPage() {
     }
   };
 
+  const handleClearFailed = async () => {
+    if (failed.length === 0) return;
+    if (!window.confirm(`Remove all ${failed.length} failed downloads?`)) return;
+    try {
+      await api.delete("/downloads/failed");
+      fetchDownloads();
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Could not clear failed downloads");
+    }
+  };
+
   // Downloads run strictly one at a time, so "active" is no longer one undifferentiated pile:
   // exactly one book is downloading and the rest are waiting their turn. Lumping them together
   // showed a queue of rows all sitting at 0%, which reads as stalled rather than as a queue.
   const active = downloads.filter(d => d.status === "queued" || d.status === "running");
-  const running = downloads.filter(d => d.status === "running");
   // Oldest first — the same order the backend worker drains them in, so positions match reality.
   const waiting = downloads
     .filter(d => d.status === "queued")
@@ -167,6 +192,14 @@ export function DownloadsPage() {
   const failed = downloads.filter(d => d.status === "error");
 
   const queuePosition = (id: number) => waiting.findIndex(d => d.id === id) + 1;
+
+  // Three pills, each with a live count. Downloading = queued|running, Downloaded = complete,
+  // Failed = error. Mirrors the filter-tab row on the Liberate page.
+  const PILLS: { key: Pill; label: string; count: number }[] = [
+    { key: "downloading", label: "Downloading", count: active.length },
+    { key: "downloaded", label: "Downloaded", count: completed.length },
+    { key: "failed", label: "Failed", count: failed.length },
+  ];
 
   return (
     <div className="max-w-[46rem] space-y-6">
@@ -256,117 +289,135 @@ export function DownloadsPage() {
         <p className="text-sm text-red-600">{scanError}</p>
       )}
 
-      {/* Active downloads */}
-      {active.length > 0 && (
-        <section>
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">
-            {running.length > 0 ? "Downloading" : "Queued"}
-            {waiting.length > 0 && ` — ${waiting.length} waiting`}
-          </h2>
-          <p className="text-xs text-slate-500 mb-2">
-            Books download one at a time to avoid Audible flagging the account for bulk activity.
-          </p>
-          <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
-            {active.map(dl => (
-              <div key={dl.id} className="px-4 py-[2.26875rem]">
-                <div className="flex items-center gap-3 mb-2">
-                  <StatusIcon status={dl.status} />
+      {/* Filter pills — same tab row as the Liberate page, three states with live counts. */}
+      <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1 w-fit flex-wrap">
+        {PILLS.map(p => (
+          <button
+            key={p.key}
+            onClick={() => setPill(p.key)}
+            className={cn(
+              "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              pill === p.key
+                ? "bg-brand-600 text-white"
+                : "text-slate-500 hover:text-slate-700"
+            )}
+          >
+            {p.label} ({p.count})
+          </button>
+        ))}
+      </div>
+
+      {/* Downloading (queued or running) */}
+      {pill === "downloading" && (
+        active.length > 0 ? (
+          <section>
+            <p className="text-xs text-slate-500 mb-2">
+              Books download one at a time to avoid Audible flagging the account for bulk activity.
+            </p>
+            <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
+              {active.map(dl => (
+                <div key={dl.id} className="px-4 py-[2.26875rem]">
+                  <div className="flex items-center gap-3 mb-2">
+                    <StatusIcon status={dl.status} />
+                    <BookThumb bookId={dl.book_id} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-900 truncate">
+                        {dl.book_title || dl.book_id}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        {dl.status === "running"
+                          ? "Downloading now"
+                          : `Waiting — #${queuePosition(dl.id)} in queue`}
+                      </p>
+                    </div>
+                    <span className="text-xs font-medium text-brand-600 tabular-nums shrink-0">
+                      {dl.progress}%
+                    </span>
+                  </div>
+                  <ProgressBar progress={dl.progress} status={dl.status} />
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : !loadingDownloads ? (
+          <EmptyPill text="Nothing downloading right now." />
+        ) : null
+      )}
+
+      {/* Downloaded (complete) */}
+      {pill === "downloaded" && (
+        completed.length > 0 ? (
+          <section>
+            <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
+              {completed.map(dl => (
+                <div key={dl.id} className="flex items-center gap-3 px-4 py-[2.26875rem]">
+                  <CheckCircle className="h-4 w-4 text-green-500 shrink-0" />
                   <BookThumb bookId={dl.book_id} />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-slate-900 truncate">
                       {dl.book_title || dl.book_id}
                     </p>
-                    <p className="text-xs text-slate-400">
-                      {dl.status === "running"
-                        ? "Downloading now"
-                        : `Waiting — #${queuePosition(dl.id)} in queue`}
-                    </p>
+                    {dl.completed_at && (
+                      <p className="text-xs text-slate-400">
+                        {new Date(dl.completed_at).toLocaleDateString()}
+                      </p>
+                    )}
                   </div>
-                  <span className="text-xs font-medium text-brand-600 tabular-nums shrink-0">
-                    {dl.progress}%
-                  </span>
+                  <button
+                    onClick={() => handleDelete(dl.id)}
+                    className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors shrink-0"
+                    title="Remove"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
-                <ProgressBar progress={dl.progress} status={dl.status} />
-              </div>
-            ))}
-          </div>
-        </section>
+              ))}
+            </div>
+          </section>
+        ) : !loadingDownloads ? (
+          <EmptyPill text="No completed downloads yet." />
+        ) : null
       )}
 
-      {/* Failed */}
-      {failed.length > 0 && (
-        <section>
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">Failed ({failed.length})</h2>
-          <div className="divide-y divide-slate-100 rounded-xl border border-red-200 bg-white overflow-hidden">
-            {failed.map(dl => (
-              <div key={dl.id} className="flex items-start gap-3 px-4 py-[2.26875rem]">
-                <XCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
-                <BookThumb bookId={dl.book_id} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">
-                    {dl.book_title || dl.book_id}
-                  </p>
-                  {dl.error_message && (
-                    <p className="text-xs text-red-500 mt-0.5 line-clamp-2">{dl.error_message}</p>
-                  )}
-                </div>
-                <button
-                  onClick={() => handleDelete(dl.id)}
-                  className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors shrink-0"
-                  title="Remove"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Completed */}
-      {completed.length > 0 && (
-        <section>
-          <h2 className="text-sm font-semibold text-slate-700 mb-2">Completed ({completed.length})</h2>
-          <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
-            {completed.map(dl => (
-              <div key={dl.id} className="flex items-center gap-3 px-4 py-[2.26875rem]">
-                <CheckCircle className="h-4 w-4 text-green-500 shrink-0" />
-                <BookThumb bookId={dl.book_id} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">
-                    {dl.book_title || dl.book_id}
-                  </p>
-                  {dl.completed_at && (
-                    <p className="text-xs text-slate-400">
-                      {new Date(dl.completed_at).toLocaleDateString()}
+      {/* Failed (error) */}
+      {pill === "failed" && (
+        failed.length > 0 ? (
+          <section>
+            <div className="flex justify-end mb-2">
+              <button
+                onClick={handleClearFailed}
+                className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Clear all failed
+              </button>
+            </div>
+            <div className="divide-y divide-slate-100 rounded-xl border border-red-200 bg-white overflow-hidden">
+              {failed.map(dl => (
+                <div key={dl.id} className="flex items-start gap-3 px-4 py-[2.26875rem]">
+                  <XCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+                  <BookThumb bookId={dl.book_id} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-900 truncate">
+                      {dl.book_title || dl.book_id}
                     </p>
-                  )}
+                    {dl.error_message && (
+                      <p className="text-xs text-red-500 mt-0.5 line-clamp-2">{dl.error_message}</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleDelete(dl.id)}
+                    className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors shrink-0"
+                    title="Remove"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
-                <button
-                  onClick={() => handleDelete(dl.id)}
-                  className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors shrink-0"
-                  title="Remove"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Empty */}
-      {!loadingDownloads && downloads.length === 0 && !scan && (
-        <div className="flex flex-col items-center py-16 text-center">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 mb-4">
-            <Headphones className="h-7 w-7 text-slate-300" />
-          </div>
-          <p className="text-sm font-medium text-slate-600">No downloads yet</p>
-          <p className="text-xs text-slate-400 mt-1">
-            Queue a book from the Liberate page, or turn on auto-download for an Audible account and
-            new books will be queued for you after each library scan.
-          </p>
-        </div>
+              ))}
+            </div>
+          </section>
+        ) : !loadingDownloads ? (
+          <EmptyPill text="No failed downloads." />
+        ) : null
       )}
     </div>
   );

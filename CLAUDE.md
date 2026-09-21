@@ -87,10 +87,28 @@ downloads many books simultaneously.
   every exception is caught and logged, or the app would silently stop downloading forever.
 - `enqueue_book(book_id, user_id, book_title)` — the single entry point for queueing. Returns `False`
   if the book is already `queued` or `running`. Manual, bulk and auto-download all go through it.
+  🔑 **Reuses a prior `error` row instead of duplicating.** If the only existing row for the ASIN is a
+  failed one, it is reset to `queued` (progress 0, error cleared) rather than inserting a second row —
+  so a retry re-enters the queue at the back with no duplicate. The old guard checked only
+  `queued`/`running`, so every automatic retry of a still-failed book added a new `error` row (observed:
+  two "Warlock, Book 4" rows, one title-less, same `book_id`).
+- **Clear all failed** — `DELETE /api/downloads/failed` (`clear_failed_downloads`). Bulk-deletes every
+  `error` row; 204, no body. Same auth as deleting a single error row (signed-in, no permission flag —
+  `_require_permission` guards only `complete` deletes). **Declared before `/{download_id}`** so the
+  literal `failed` is not routed into the int path param.
+- **Auto-clear failed on success** — when `_run_download` sets a row to `complete`, it then deletes every
+  `error` row for the SAME `book_id` (matched by ASIN because `book_title` may be blank). A later success
+  supersedes an earlier failure, so a book that finally downloads stops showing under Failed.
 - `POST /api/downloads` inserts a `queued` row and returns. **It does not spawn a task** — previously
   every caller did, so queueing N books started N concurrent downloads.
 - **Restart handling** (`main.py` lifespan): rows left `running` are set back to `queued` and resume;
   `queued` rows are untouched. Both used to be flipped to `error`, so restarting mid-batch discarded it.
+- **Downloads page (frontend, `DownloadsPage.tsx`)** — a three-pill filter row (same tab component as
+  the Liberate page) replaces the old stacked sections: **Downloading** (`queued`|`running`),
+  **Downloaded** (`complete`), **Failed** (`error`), each with a live count. Default pill is always
+  **Downloading** on load (not persisted). The Scan Library button and scan banners sit above the pills,
+  unchanged. A **Clear all failed** button shows only on the Failed pill when the count > 0, with a
+  `window.confirm` guard, and refetches on success.
 
 ## Scheduled scans (`_scan_scheduler` in `backend/app/api/downloads.py`)
 - A second lifespan task. Every tick it re-reads `scan_interval_minutes` (so a Settings change applies
@@ -191,6 +209,7 @@ docker compose up --build
 - Background tasks update DB rows as progress changes; frontend polls `/api/downloads` every 2s
 - Duplicate active downloads blocked with 409
 - **Auto-download after scan** (`_auto_download_if_enabled`): called via `asyncio.create_task` after every successful scan, scheduled or manual. Reads `audible_account_settings` for accounts with `auto_download=1`; for each, fetches `not_liberated` book IDs and **enqueues** them under the admin user via `enqueue_book`, which skips anything already queued or running.
+  - 🔑 **Skips any `book_id` that already has an `error` row.** It builds `{r.book_id for r in db.query(Download.book_id).filter(status=="error")}` once and skips those in the enqueue loop. `enqueue_book` itself would REUSE a failed row (see *Download queue*), but the AUTOMATIC path must not: a licence-denied book fails on every scan, so re-queuing it each time would hammer Audible and churn the Failed list. Manual and bulk user downloads still reach `enqueue_book` and CAN retry a failed book — the user re-authenticates then retries deliberately.
   - ⚠ The 30-minute global cooldown was **removed**. With scheduled scans able to run every 15 minutes it would have silently skipped auto-download on most of them — the setting would have said 15 and behaved like 30. The duplicate guard plus the serial queue already prevent the stampede it was guarding against. `system_settings.last_auto_download_at` is still written, but only as a record; nothing reads it to gate anything.
 - `POST /api/downloads/scan?account_id=<id>` — optional `account_id` scans a single Audible account.
 
