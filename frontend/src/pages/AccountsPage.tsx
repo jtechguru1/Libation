@@ -4,7 +4,7 @@ import {
   Users, Plus, CheckCircle, ExternalLink,
   Copy, ChevronRight, Loader2, Globe, AlertCircle, Trash2, User, Info, X, RefreshCw, KeyRound,
 } from "lucide-react";
-import { api, usersApi, accountsApi } from "@/lib/api";
+import { api, usersApi, accountsApi, errorText } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/utils";
 
@@ -131,7 +131,7 @@ export function AccountsPage() {
       setLoginUrl(data.login_url);
       setStep("url");
     } catch (e: any) {
-      setError(e.response?.data?.detail || "Failed to start login. Check that LibationCli is installed.");
+      setError(errorText(e, "Failed to start login. Check that LibationCli is installed."));
     } finally {
       setBusy(false);
     }
@@ -159,12 +159,11 @@ export function AccountsPage() {
         });
       } catch (scanErr: any) {
         setScanStartError(
-          scanErr.response?.data?.detail ||
-          "The account was added, but the library scan could not be started. Run Scan Library on the account below."
+          errorText(scanErr, "The account was added, but the library scan could not be started. Run Scan Library on the account below.")
         );
       }
     } catch (e: any) {
-      setError(e.response?.data?.detail || "Failed to complete login. Make sure you pasted the correct URL.");
+      setError(errorText(e, "Failed to complete login. Make sure you pasted the correct URL."));
     } finally {
       setBusy(false);
     }
@@ -184,7 +183,7 @@ export function AccountsPage() {
       await api.delete(`/accounts/${encodeURIComponent(accountId)}`);
       setAccounts(prev => prev.filter(a => a.account_id !== accountId));
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Failed to remove account.");
+      alert(errorText(e, "Failed to remove account."));
     } finally {
       setRemoving(null);
     }
@@ -214,7 +213,7 @@ export function AccountsPage() {
       setLoginUrl(data.login_url);
       setStep("url");
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Failed to re-authenticate account.");
+      alert(errorText(e, "Failed to re-authenticate account."));
     } finally {
       setReauthenticating(null);
     }
@@ -260,7 +259,7 @@ export function AccountsPage() {
         prev.map(a => a.account_id === accountId ? { ...a, auto_download: !current } : a)
       );
     } catch (e: any) {
-      alert(e.response?.data?.detail || "Failed to update auto-download.");
+      alert(errorText(e, "Failed to update auto-download."));
     } finally {
       setTogglingAutoDownload(null);
     }
@@ -301,7 +300,7 @@ export function AccountsPage() {
       await loadUsers();
       await fetchAccounts();
     } catch (e: any) {
-      setScanStartError(e.response?.data?.detail || "Could not change the account owner.");
+      setScanStartError(errorText(e, "Could not change the account owner."));
     } finally {
       setSavingOwner(null);
     }
@@ -318,7 +317,7 @@ export function AccountsPage() {
       await loadUsers();
       await fetchAccounts();
     } catch (e: any) {
-      setScanStartError(e.response?.data?.detail || "Could not save the owner name.");
+      setScanStartError(errorText(e, "Could not save the owner name."));
     } finally {
       setSavingOwner(null);
     }

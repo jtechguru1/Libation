@@ -134,3 +134,15 @@ export const settingsApi = {
   updateAutomation: (data: Record<string, unknown>) =>
     api.put("/settings/automation", data),
 };
+
+/**
+ * Text for an API error, safe to render. FastAPI `detail` is usually a string, but some endpoints
+ * return an object (the scan cooldown guard sends `{message, last_scan_at, ...}`); putting that
+ * object straight into JSX crashes the page with React error #31.
+ */
+export function errorText(e: any, fallback: string): string {
+  const detail = e?.response?.data?.detail;
+  if (typeof detail === "string" && detail) return detail;
+  if (detail && typeof detail === "object" && typeof detail.message === "string") return detail.message;
+  return fallback;
+}
