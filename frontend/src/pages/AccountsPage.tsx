@@ -47,17 +47,24 @@ function LocaleBadge({ locale }: { locale: string }) {
   );
 }
 
-function StatusTooltip({ authenticated }: { authenticated: boolean }) {
+function StatusTooltip({ authenticated, needsReauth = false }: { authenticated: boolean; needsReauth?: boolean }) {
+  // needs_reauth wins over authenticated: the account still holds tokens (authenticated=true) but
+  // Audible refuses licences to its old device registration, so a plain green check would say
+  // "all good" when downloads will in fact fail. Show the warning state until it is re-authenticated.
+  const ok = authenticated && !needsReauth;
+  const label = needsReauth
+    ? "Needs re-authentication — downloads will fail until re-authenticated"
+    : authenticated ? "Authenticated" : "Not authenticated — re-login required";
   return (
     <div className="relative group inline-flex shrink-0">
-      {authenticated ? (
+      {ok ? (
         <CheckCircle className="h-4 w-4 text-green-500 cursor-default" />
       ) : (
         <AlertCircle className="h-4 w-4 text-amber-400 cursor-default" />
       )}
       <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block z-10 pointer-events-none">
         <span className="rounded-md bg-slate-800 px-2 py-1 text-xs text-white whitespace-nowrap shadow-lg block">
-          {authenticated ? "Authenticated" : "Not authenticated — re-login required"}
+          {label}
         </span>
         <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800 block" />
       </span>
@@ -695,11 +702,11 @@ export function AccountsPage() {
                   {acc.name?.[0]?.toUpperCase() || acc.account_id[0]?.toUpperCase()}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">{acc.name || acc.account_id}</p>
-                  <p className="text-xs text-slate-500 truncate">{acc.account_id}</p>
+                  <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{acc.name || acc.account_id}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{acc.account_id}</p>
                 </div>
                 <LocaleBadge locale={acc.locale} />
-                <StatusTooltip authenticated={acc.authenticated} />
+                <StatusTooltip authenticated={acc.authenticated} needsReauth={acc.needs_reauth} />
                 {acc.needs_reauth && (
                   <span
                     title="Registered under an older Libation; Audible refuses licences to it until re-authenticated (rmcrackan/Libation#2021)"
@@ -730,11 +737,11 @@ export function AccountsPage() {
                     onClick={() => handleScanAccount(acc.account_id, acc.name)}
                     disabled={scanningAccount !== null}
                     title="Scan this account's Audible library for new books"
-                    className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+                    className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
                   >
                     {scanningAccount === acc.account_id
-                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <RefreshCw className="h-3.5 w-3.5" />}
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <RefreshCw className="h-4 w-4" />}
                     {scanningAccount === acc.account_id ? "Scanning…" : "Scan Library"}
                   </button>
                 )}
@@ -812,7 +819,7 @@ export function AccountsPage() {
                 ) : acc.owner_name ? (
                   <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{acc.owner_name}</span>
                 ) : acc.owner_username ? (
-                  <span className="text-xs text-slate-500">{acc.owner_username}</span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">{acc.owner_username}</span>
                 ) : (
                   <span className="text-xs italic text-slate-400">Unassigned</span>
                 )}
@@ -829,7 +836,7 @@ export function AccountsPage() {
                     onClick={() => toggleAutoDownload(acc.account_id, acc.auto_download)}
                     disabled={togglingAutoDownload === acc.account_id}
                     className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:opacity-50 ${
-                      acc.auto_download ? "bg-brand-600" : "bg-slate-200"
+                      acc.auto_download ? "bg-brand-600" : "bg-slate-200 dark:bg-slate-600"
                     }`}
                     role="switch"
                     aria-checked={acc.auto_download}
@@ -838,7 +845,7 @@ export function AccountsPage() {
                   </button>
                   {/* The label used to stand alone with nothing anywhere explaining when
                       auto-download fires or what it downloads. */}
-                  <span className="group relative text-xs text-slate-500 cursor-help border-b border-dotted border-slate-300 dark:border-slate-600">
+                  <span className="group relative text-xs text-slate-500 dark:text-slate-400 cursor-help border-b border-dotted border-slate-300 dark:border-slate-600">
                     Auto-download new books
                     <span className="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded-lg bg-slate-800 px-2.5 py-1.5 text-xs font-normal text-white shadow-lg z-10">
                       After every library scan — scheduled or manual — any book in this account that
