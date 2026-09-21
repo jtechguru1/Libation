@@ -314,7 +314,7 @@ export function DownloadsPage() {
             <p className="text-xs text-slate-500 mb-2">
               Books download one at a time to avoid Audible flagging the account for bulk activity.
             </p>
-            <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <div className="divide-y divide-slate-100 dark:divide-slate-700 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
               {active.map(dl => (
                 <div key={dl.id} className="px-4 py-[2.26875rem]">
                   <div className="flex items-center gap-3 mb-2">
@@ -348,7 +348,7 @@ export function DownloadsPage() {
       {pill === "downloaded" && (
         completed.length > 0 ? (
           <section>
-            <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <div className="divide-y divide-slate-100 dark:divide-slate-700 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
               {completed.map(dl => (
                 <div key={dl.id} className="flex items-center gap-3 px-4 py-[2.26875rem]">
                   <CheckCircle className="h-4 w-4 text-green-500 shrink-0" />
@@ -391,7 +391,7 @@ export function DownloadsPage() {
                 <Trash2 className="h-3.5 w-3.5" /> Clear all failed
               </button>
             </div>
-            <div className="divide-y divide-slate-100 rounded-xl border border-red-200 bg-white overflow-hidden">
+            <div className="divide-y divide-slate-100 dark:divide-slate-700 rounded-xl border border-red-200 dark:border-red-900 bg-white dark:bg-slate-800 overflow-hidden">
               {failed.map(dl => (
                 <div key={dl.id} className="flex items-start gap-3 px-4 py-[2.26875rem]">
                   <XCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />

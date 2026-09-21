@@ -484,7 +484,7 @@ export function AccountsPage() {
 
       {/* Add account flow */}
       {step !== "idle" && (
-        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
           {/* Step indicator */}
           <div className="flex border-b border-slate-100">
             {[
@@ -687,7 +687,7 @@ export function AccountsPage() {
           <p className="text-xs text-slate-400 mt-1">Add an Audible account to get started.</p>
         </div>
       ) : (
-        <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="divide-y divide-slate-100 dark:divide-slate-700 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
           {accounts.map(acc => (
             <div key={acc.account_id} className="px-5 py-4">
               <div className="flex items-center gap-4">
