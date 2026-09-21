@@ -120,10 +120,9 @@ together, plus several problems found while verifying the fixes.
 
 ### Notes for operators
 
-- **Scanning frequently can get your Audible account rate-limited.** Once that happens, downloads
-  fail with a licence denial *even for books you own outright*. This was observed during development:
-  five scans of a 681-title library within 21 minutes produced `"RejectionReason": "CustomerThrottled"`
-  on every subsequent download. The persisted schedule, the manual-scan guard, and the queue
-  stand-down all exist because of it. Intervals under 3 hours now carry a warning in Settings.
-- `LIBATION_VERSION` is unchanged at `13.4.9`. Bumping it requires rebuilding LibationBridge against
-  the new DLLs and is a separate change.
+- **Scan intervals under 3 hours carry a warning in Settings.** Audible does rate-limit accounts
+  that hammer its API, and the persisted schedule, the manual-scan guard and the queue stand-down
+  exist to keep an install well inside that. ⚠ *Correction (2026-09-21):* during Phase 9 development
+  every download returned `"RejectionReason": "CustomerThrottled"` and this was attributed to five
+  scans in 21 minutes. It was not — that is the exact symptom of upstream bug #2021 (see the 14.2.2
+  entry above), which affected every Libation 13.x install regardless of scan frequency.
