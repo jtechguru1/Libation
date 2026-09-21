@@ -111,6 +111,12 @@ export const usersApi = {
     api.delete(`/users/${id}`),
 };
 
+// Accounts API
+export const accountsApi = {
+  reauthenticateAccount: (accountId: string) =>
+    api.post(`/accounts/${encodeURIComponent(accountId)}/reauthenticate`),
+};
+
 // Settings API
 export const settingsApi = {
   getLibation: () =>

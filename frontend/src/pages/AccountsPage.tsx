@@ -2,9 +2,9 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, Plus, CheckCircle, ExternalLink,
-  Copy, ChevronRight, Loader2, Globe, AlertCircle, Trash2, User, Info, X, RefreshCw,
+  Copy, ChevronRight, Loader2, Globe, AlertCircle, Trash2, User, Info, X, RefreshCw, KeyRound,
 } from "lucide-react";
-import { api, usersApi } from "@/lib/api";
+import { api, usersApi, accountsApi } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +77,10 @@ export function AccountsPage() {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [reauthenticating, setReauthenticating] = useState<string | null>(null);
+  // True while the open login modal is re-authenticating an existing account rather than adding
+  // a new one — skips the email/locale form step and shows them read-only instead.
+  const [reauthMode, setReauthMode] = useState(false);
   const [showNextStep, setShowNextStep] = useState(false);
   const [togglingAutoDownload, setTogglingAutoDownload] = useState<string | null>(null);
   const [ownerNameInput, setOwnerNameInput] = useState("");
@@ -186,6 +190,36 @@ export function AccountsPage() {
     }
   };
 
+  /** Remove the account's old Audible device registration and start a fresh login-external
+   *  session for it. Audible now refuses licences to Libation's old device registration
+   *  (rmcrackan/Libation#2021) — removing and re-adding is upstream's documented fix. The
+   *  account is already gone from Libation's AccountsSettings.json once this call succeeds, so
+   *  it's dropped from the list immediately, same as a manual remove. */
+  const handleReauthenticate = async (accountId: string, accountLocale: string) => {
+    const confirmed = window.confirm(
+      "This removes the account from Libation and registers it with Audible again as a new " +
+      "device. Your library and settings are kept. Continue?\n\n" +
+      'Use this if downloads fail with "Content License denied".'
+    );
+    if (!confirmed) return;
+    setReauthenticating(accountId);
+    setError("");
+    try {
+      const { data } = await accountsApi.reauthenticateAccount(accountId);
+      setAccounts(prev => prev.filter(a => a.account_id !== accountId));
+      setEmail(accountId); // account_id is the Audible email
+      setLocale(accountLocale);
+      setReauthMode(true);
+      setSessionId(data.session_id);
+      setLoginUrl(data.login_url);
+      setStep("url");
+    } catch (e: any) {
+      alert(e.response?.data?.detail || "Failed to re-authenticate account.");
+    } finally {
+      setReauthenticating(null);
+    }
+  };
+
   /** Scan one Audible account's library. `libationcli scan` takes a positional account id, so this
    *  scans only that account rather than every account on the system. */
   const handleScanAccount = async (accountId: string, accountName: string, force = false) => {
@@ -240,6 +274,7 @@ export function AccountsPage() {
     setLoginUrl("");
     setResponseUrl("");
     setError("");
+    setReauthMode(false);
   };
 
   const canToggleAutoDownload = (acc: Account) =>
@@ -488,6 +523,13 @@ export function AccountsPage() {
             {/* Step 2: Login URL */}
             {step === "url" && (
               <div className="space-y-4">
+                {reauthMode && (
+                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    <RefreshCw className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                    Re-authenticating <span className="font-medium text-slate-800">{email}</span>
+                    <LocaleBadge locale={locale} />
+                  </div>
+                )}
                 <p className="text-sm text-slate-600">
                   Open the link below in your browser and sign in to Audible. After signing in,
                   copy the full URL from your browser's address bar and paste it in the next step.
@@ -538,6 +580,13 @@ export function AccountsPage() {
             {/* Step 3: Response URL */}
             {step === "completing" && (
               <div className="space-y-4">
+                {reauthMode && (
+                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    <RefreshCw className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                    Re-authenticating <span className="font-medium text-slate-800">{email}</span>
+                    <LocaleBadge locale={locale} />
+                  </div>
+                )}
                 <p className="text-sm text-slate-600">
                   Paste the URL from your browser's address bar after signing in.
                   It typically starts with <code className="bg-slate-100 px-1 rounded text-xs">https://</code> or <code className="bg-slate-100 px-1 rounded text-xs">audible://</code>.
@@ -632,6 +681,16 @@ export function AccountsPage() {
                     {scanningAccount === acc.account_id ? "Scanning…" : "Scan Library"}
                   </button>
                 )}
+                <button
+                  onClick={() => handleReauthenticate(acc.account_id, acc.locale)}
+                  disabled={reauthenticating === acc.account_id || removing === acc.account_id}
+                  title='Re-authenticate: removes and re-registers this account with Audible. Use if downloads fail with "Content License denied".'
+                  className="p-1 rounded hover:bg-brand-50 text-slate-300 hover:text-brand-600 transition-colors shrink-0 disabled:opacity-50"
+                >
+                  {reauthenticating === acc.account_id
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <KeyRound className="h-4 w-4" />}
+                </button>
                 <button
                   onClick={() => handleRemove(acc.account_id)}
                   disabled={removing === acc.account_id}

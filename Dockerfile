@@ -9,7 +9,7 @@ RUN npm run build
 # ── Stage 2: Build LibationBridge ────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS bridge-builder
 
-ARG LIBATION_VERSION=13.4.9
+ARG LIBATION_VERSION=14.2.2
 
 # Install deps needed to run the Libation .deb post-install scripts
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,7 +46,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
-ARG LIBATION_VERSION=13.4.9
+ARG LIBATION_VERSION=14.2.2
 
 WORKDIR /app
 

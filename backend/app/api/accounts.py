@@ -136,21 +136,67 @@ async def toggle_auto_download(
     return MessageResponse(message="Auto-download updated")
 
 
-@router.delete("/{account_id}", response_model=MessageResponse)
-async def delete_account(account_id: str, _=Depends(get_current_user)):
+def _remove_account_entry(account_id: str) -> None:
+    """Remove one account from AccountsSettings.json in place. Shared by `delete_account` and
+    `reauthenticate_account` so the file-rewrite logic exists in exactly one place."""
     accounts_file = Path(settings.LIBATION_CONFIG) / "AccountsSettings.json"
     if not accounts_file.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AccountsSettings.json not found")
+    data = json.loads(accounts_file.read_text())
+    original = data.get("Accounts", [])
+    filtered = [a for a in original if a.get("AccountId") != account_id]
+    if len(filtered) == len(original):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    data["Accounts"] = filtered
+    accounts_file.write_text(json.dumps(data, indent=2))
+
+
+@router.delete("/{account_id}", response_model=MessageResponse)
+async def delete_account(account_id: str, _=Depends(get_current_user)):
     try:
-        data = json.loads(accounts_file.read_text())
-        original = data.get("Accounts", [])
-        filtered = [a for a in original if a.get("AccountId") != account_id]
-        if len(filtered) == len(original):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-        data["Accounts"] = filtered
-        accounts_file.write_text(json.dumps(data, indent=2))
+        _remove_account_entry(account_id)
         return MessageResponse(message="Account removed")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post("/{account_id}/reauthenticate", response_model=StartLoginResponse)
+async def reauthenticate_account(account_id: str, _=Depends(get_current_user)):
+    """Remove the account's old device registration and start a fresh login-external session for
+    it, so the frontend can drive the existing OAuth modal straight to the "paste the redirect
+    URL" step. Audible now refuses licences to Libation's old device registration
+    (rmcrackan/Libation#2021); removing and re-adding is upstream's fix, and this endpoint does
+    both halves as one action.
+
+    The `audible_account_settings` DB row (auto_download, added_by_user_id) is deliberately left
+    untouched — `account_id` is the account's email, so re-adding it lands back on the same row
+    via `login/complete`'s `INSERT OR IGNORE`.
+    """
+    try:
+        accounts = await cli.list_accounts()
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+    # Source the locale from the same place GET /api/accounts does (the bridge's parsed
+    # `list-accounts --bare` output) rather than AccountsSettings.json's raw IdentityTokens —
+    # it's already in the exact format `start_login`/`login-external -l` expects.
+    match = next((a for a in accounts if a.get("account_id") == account_id), None)
+    if match is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    locale = match["locale"]
+
+    _remove_account_entry(account_id)
+
+    try:
+        result = await cli.start_login(account_id, locale)
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"The account was removed, but re-registration could not be started ({e}). "
+                'Re-add it via "Add account".'
+            ),
+        )
+    return StartLoginResponse(**result)

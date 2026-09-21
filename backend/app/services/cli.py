@@ -123,9 +123,13 @@ async def start_login(email: str, locale: str) -> dict:
     os.close(slave_fd)
 
     try:
+        # Wait for the line terminator AFTER the URL, not just the URL's start. The reader returns
+        # on the first chunk that matches, and the v14 login URL is ~940 chars that the PTY can
+        # deliver in several writes — matching on the prefix alone handed the browser a truncated
+        # URL (Amazon: "not a functioning page", 2026-09-21).
         output = await _read_fd_until(
             master_fd,
-            pattern=r"https://www\.amazon\.[^\s]+",
+            pattern=r"https://www\.amazon\.[^\s]+[\r\n]",
             timeout=30,
         )
     except asyncio.TimeoutError:
@@ -150,7 +154,7 @@ async def start_login(email: str, locale: str) -> dict:
         )
 
     login_url = match.group(0).rstrip(".")
-    logger.info("[login] Login URL generated for %s (%.1fs) — waiting for user response", email, time.monotonic() - t0)
+    logger.info("[login] Login URL generated for %s (%d chars, %.1fs) — waiting for user response", email, len(login_url), time.monotonic() - t0)
     session_id = str(uuid.uuid4())
     _PENDING_LOGINS[session_id] = {
         "email": email,

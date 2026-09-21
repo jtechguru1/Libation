@@ -5,6 +5,34 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [Unreleased] — Libation 14.2.2: fixes "Content License denied" on every download
+
+### Fixed
+
+- **Every download failed with `Content License denied`.** Upstream bug
+  [rmcrackan/Libation#2021](https://github.com/rmcrackan/Libation/issues/2021): Libation registered
+  its Android device with a serial number twice the expected length and Audible began refusing
+  licences to it. Fixed upstream in v14.2.0; this image moves from **13.4.9 to 14.2.2**. The
+  LibationBridge sidecar compiled unchanged against the v14 DLLs.
+  ⚠ **Updating alone is not enough** — the old device registration stays broken until the account
+  is removed and re-added. Use the new Re-authenticate button below.
+- **The Audible login URL could arrive truncated** (Amazon showed "not a functioning page"). The
+  v14 login URL is ~940 characters and the backend returned it as soon as its *start* appeared in
+  the CLI output; it now waits for the end of the line.
+
+### Added
+
+- **Re-authenticate button** (key icon) on each Audible account card. Removes the account from
+  Libation and immediately starts a fresh sign-in for the same email and locale, so the account is
+  registered with Audible as a new device. Library data and per-account settings (auto-download,
+  owner) are kept. New endpoint `POST /api/accounts/{id}/reauthenticate`.
+
+### Changed
+
+- Libation 14 encrypts stored tokens by default. With no OS secret store in a container it writes a
+  portable `libation-master.key` next to `AccountsSettings.json` in `/config`. Treat it like a
+  password; it lives in the `config` volume and is never part of the image.
+
 ## [Unreleased] — Phase 9: download queue, scheduled scans, first-run onboarding
 
 Six reported issues, which turned out to be three defects and three missing features that chained
