@@ -43,7 +43,7 @@ function EmptyPill({ text }: { text: string }) {
       <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100 mb-4">
         <Headphones className="h-7 w-7 text-slate-300" />
       </div>
-      <p className="text-sm font-medium text-slate-600">{text}</p>
+      <p className="text-sm font-medium text-slate-600 dark:text-slate-300">{text}</p>
     </div>
   );
 }
@@ -206,8 +206,8 @@ export function DownloadsPage() {
       {/* Header + scan */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Downloads</h1>
-          <p className="text-sm text-slate-500 mt-0.5">
+          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">Downloads</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
             Manage your audiobook download queue.
           </p>
         </div>
@@ -311,7 +311,7 @@ export function DownloadsPage() {
       {pill === "downloading" && (
         active.length > 0 ? (
           <section>
-            <p className="text-xs text-slate-500 mb-2">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
               Books download one at a time to avoid Audible flagging the account for bulk activity.
             </p>
             <div className="divide-y divide-slate-100 dark:divide-slate-700 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden">
@@ -321,7 +321,7 @@ export function DownloadsPage() {
                     <StatusIcon status={dl.status} />
                     <BookThumb bookId={dl.book_id} />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-900 truncate">
+                      <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
                         {dl.book_title || dl.book_id}
                       </p>
                       <p className="text-xs text-slate-400">
@@ -354,7 +354,7 @@ export function DownloadsPage() {
                   <CheckCircle className="h-4 w-4 text-green-500 shrink-0" />
                   <BookThumb bookId={dl.book_id} />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-900 truncate">
+                    <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
                       {dl.book_title || dl.book_id}
                     </p>
                     {dl.completed_at && (
@@ -397,7 +397,7 @@ export function DownloadsPage() {
                   <XCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
                   <BookThumb bookId={dl.book_id} />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-900 truncate">
+                    <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
                       {dl.book_title || dl.book_id}
                     </p>
                     {dl.error_message && (
