@@ -1,0 +1,39 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# commit-msg hook — keep CHANGELOG.md in step with user-facing changes.
+#
+# WHY: the in-app "What's new" (Settings > About) reads CHANGELOG.md baked into the
+# image, so a user-facing change committed WITHOUT a changelog line leaves that panel
+# stale — which has happened. This blocks that at commit time, no memory required.
+#
+# SCOPE: git hooks are PER-REPOSITORY. This only runs on commits in THIS repo; it
+# cannot fire on the vault or any other repo. It is inert until activated per clone:
+#     git config core.hooksPath .githooks
+#
+# ESCAPE HATCH: put [skip changelog] anywhere in the commit message for changes that
+# genuinely need no changelog line (pure refactor, docs, chore, the changelog commit).
+# ─────────────────────────────────────────────────────────────────────────────
+msg_file="$1"
+
+# 1. Explicit skip wins.
+if grep -qiF '[skip changelog]' "$msg_file"; then
+    exit 0
+fi
+
+# 2. Did this commit stage any user-facing code?
+staged=$(git diff --cached --name-only)
+if printf '%s\n' "$staged" | grep -qE '^(frontend|backend|libation-bridge)/'; then
+    # 3. ...and did it also stage CHANGELOG.md?
+    if ! printf '%s\n' "$staged" | grep -qx 'CHANGELOG.md'; then
+        echo "" >&2
+        echo "  ✗ Commit blocked — user-facing code changed but CHANGELOG.md was not updated." >&2
+        echo "" >&2
+        echo "    The in-app 'What's new' (Settings > About) reads CHANGELOG.md, so it goes stale." >&2
+        echo "" >&2
+        echo "    Fix   : add a line under the current release in CHANGELOG.md, then 'git add CHANGELOG.md'." >&2
+        echo "    Skip  : put [skip changelog] in the commit message (refactor / docs / chore)." >&2
+        echo "" >&2
+        exit 1
+    fi
+fi
+exit 0

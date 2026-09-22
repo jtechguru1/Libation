@@ -302,6 +302,23 @@ docker compose up --build
 - **Phase 10** (complete): "Re-authenticate" on the Accounts page. Audible now refuses licences to Libation's old device registration (rmcrackan/Libation#2021); upstream's fix is remove-and-re-add the account. `POST /api/accounts/{account_id}/reauthenticate` does both steps as one call — same auth as `DELETE`, removes the entry from `AccountsSettings.json` via a `_remove_account_entry` helper shared with `delete_account`, then calls `cli.start_login` and returns a `StartLoginResponse` so the frontend can drive the existing OAuth modal straight to "open login URL" → paste redirect. `audible_account_settings` DB row is left alone on purpose. `AccountsPage.tsx` gets a `KeyRound` icon button next to the remove control, a `window.confirm` warning, and a read-only email/locale banner while the reused login modal is in re-auth mode (`reauthMode`); `accountsApi.reauthenticateAccount` added to `api.ts`.
 - **Phase 11 — "What's new" changelog viewer** (complete): The web UI gets its own real version number, `APP_VERSION` in the new `backend/app/version.py` (currently `0.5.0`), used by `/api/health` and the FastAPI app version. `GET /api/updates/version` gains `app_version` alongside `cli_version`. New `GET /api/updates/changelog` (same auth as `/version`) reads `CHANGELOG.md` — `/app/CHANGELOG.md` in the image (Dockerfile now copies it next to `backend/app`), the repo root in local dev — and never 500s on a missing file. Settings → About (`AboutSection` in `SettingsPage.tsx`) now shows `Web UI v<app_version> · LibationCli v<cli_version>` and, below it, a "What's new" panel that fetches the changelog, splits it on `\n## ` release headings, renders the newest release expanded and every older one collapsed behind a native `<details>`/`<summary>`, and scrolls internally past `60vh`. Rendered with `react-markdown` + `remark-gfm`, Tailwind-styled (dark mode included) to match the rest of Settings. The old "rebuild the Docker image to update LibationCLI" hint text was removed from the card — it's a maintainer instruction, not something an end user of the image needs to see.
 
+## Changelog discipline (enforced by a git hook)
+
+Every commit that changes user-facing code (`frontend/`, `backend/`, `libation-bridge/`) MUST also
+update `CHANGELOG.md` under the current release heading — the in-app "What's new" (Settings → About)
+reads `CHANGELOG.md` from the image, so a change shipped without a changelog line leaves that panel
+stale.
+
+A **`commit-msg` git hook** enforces this: `.githooks/commit-msg` blocks such a commit. Escape hatch
+for changes that genuinely need no line (pure refactor, docs, chore, the changelog commit itself):
+put **`[skip changelog]`** anywhere in the commit message.
+
+- Git hooks are **per-repository** and live outside the tracked tree once active, so this never fires
+  on any other repo (e.g. the vault) and never affects users who clone — it is inert until activated.
+- **Activate it after a fresh clone / recreated scratch copy** with:
+  `git config core.hooksPath .githooks`
+- `.githooks/**` is pinned to LF in `.gitattributes` (a CRLF shebang would break the hook under `sh`).
+
 ## Pre-push sanitization (REQUIRED before any `git push`)
 
 Before pushing to GitHub, the working tree must be fully sanitized. The container
