@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { QueuePauseBanner } from "@/components/QueuePauseBanner";
 
 interface DownloadItem {
   id: number;
@@ -222,6 +223,9 @@ export function DownloadsPage() {
           {scanning || scan?.status === "running" ? "Scanning…" : "Scan Library"}
         </button>
       </div>
+
+      {/* Says what the download queue is doing whenever books are waiting; admins can start it again */}
+      <QueuePauseBanner />
 
       {/* Scan status */}
       {scan && scanVisible && (

@@ -107,6 +107,27 @@ async def list_accounts() -> list[dict]:
     return accounts
 
 
+def abort_login(session_id: str) -> bool:
+    """Stop a sign-in that was cancelled, so its login tool cannot write the accounts file afterwards."""
+    s = _PENDING_LOGINS.pop(session_id, None)
+    if not s:
+        return False
+    try:
+        s["proc"].kill()
+    except Exception:
+        pass
+    try:
+        os.close(s["master_fd"])
+    except OSError:
+        pass
+    return True
+
+
+def live_login_sessions() -> list:
+    """Session ids of sign-ins still running (an expired one gets its old registration back)."""
+    return list(_PENDING_LOGINS.keys())
+
+
 async def start_login(email: str, locale: str) -> dict:
     """Start login-external via PTY. Kept in Python — PTY allocation is simpler here."""
     logger = get_logger()

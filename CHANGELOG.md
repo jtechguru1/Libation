@@ -5,6 +5,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.5.1] — 2026-10-18 — safer re-authentication, download queue says why it is waiting
+
+### Fixed
+- **Re-authenticating could sign an account in as somebody else.** The key icon opens Amazon's sign-in, which uses
+  whatever Amazon login the browser already has. In a household with more than one Amazon account, the account was
+  silently re-registered to the wrong customer, and every download then failed with "Content License denied"
+  (Audible: "no ownership ... for customer"). The new sign-in must now belong to the same Amazon customer as before;
+  if it doesn't, it is refused, the account is put back exactly as it was, and the message says to sign in again in a
+  private / incognito window. The re-auth dialog says so up front.
+- **A cancelled or failed re-authentication no longer deletes the account.** Closing the sign-in window, a failed
+  sign-in, an expired one or a container restart in the middle now puts the old registration back (it used to be
+  gone, and had to be re-added by hand). Closing the window also stops the sign-in tool straight away.
+
+### Added
+- **The Downloads page says why queued books are not downloading.** A banner shows what the queue is doing whenever
+  books are waiting: downloading, the pause between downloads, paused for 30 minutes after repeated failures (with the
+  last error), or not running at all. Admins get a **Start now** button that ends any wait at once - and restarts the
+  queue if it has stopped.
+
 ## [0.5.0] — 2026-09-21 — Libation 14.2.2, download queue, scheduled scans, first-run onboarding
 
 Libation 14.2.2 fixes "Content License denied" on every download. Six further reported issues,

@@ -4,4 +4,4 @@ Not to be confused with the installed LibationCLI version (see `backend/app/api/
 which is read at runtime from `libationcli --version`.
 """
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"

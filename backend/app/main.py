@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI):
 
     # One worker drains the download queue serially; one scheduler runs periodic library scans.
     # Both are started exactly once, here, and cancelled on shutdown.
-    worker_task = asyncio.create_task(downloads_router._download_worker())
+    worker_task = downloads_router.ensure_worker()     # Start now can replace a dead worker
     scheduler_task = asyncio.create_task(downloads_router._scan_scheduler())
 
     logger.info("[startup] Ready")

@@ -198,6 +198,37 @@ _MAX_CONSECUTIVE_FAILURES = 3
 _THROTTLE_MARKERS = ("customerthrottled", "being throttled", "too many requests", "429")
 
 
+# Queued books must never sit still without saying why. The worker records what it is doing - downloading,
+# waiting between books, paused after failures, idle - plus a heartbeat; GET /downloads/queue/state reports it and
+# an admin's "Start now" ends any wait (and starts a new worker if the old one died).
+_QUEUE_STATE: dict = {"state": "starting", "book": None, "until": None, "reason": "", "beat": None}
+_RESUME = asyncio.Event()
+_WORKER: dict = {"task": None}
+
+
+def _set_state(state: str, book=None, until=None, reason: str = "") -> None:
+    _QUEUE_STATE.update(state=state, book=book, until=until, reason=reason,
+                        beat=datetime.now(timezone.utc).isoformat())
+
+
+async def _wait_or_resume(seconds: float) -> bool:
+    """Sleep, unless an admin presses Start now. True when ended early."""
+    _RESUME.clear()
+    try:
+        await asyncio.wait_for(_RESUME.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+def ensure_worker() -> asyncio.Task:
+    """Start the download worker (at app start, or again from Start now if the old one has died)."""
+    t = _WORKER.get("task")
+    if t is None or t.done():
+        _WORKER["task"] = asyncio.create_task(_download_worker())
+    return _WORKER["task"]
+
+
 def _is_throttled(message: str) -> bool:
     low = (message or "").lower()
     return any(m in low for m in _THROTTLE_MARKERS)
@@ -223,10 +254,12 @@ async def _download_worker() -> None:
                 job = (nxt.id, nxt.book_id, nxt.book_title) if nxt else None
 
             if job is None:
+                _set_state("idle")
                 await asyncio.sleep(_QUEUE_POLL_SECONDS)
                 continue
 
             dl_id, book_id, title = job
+            _set_state("downloading", book=title or book_id)
             logger.info("[queue] Starting download %s (%s)", book_id, title or "untitled")
             await _run_download(dl_id, book_id)
 
@@ -257,7 +290,14 @@ async def _download_worker() -> None:
                     consecutive_failures, _BACKOFF_SECONDS // 60, err[:200],
                 )
                 consecutive_failures = 0
-                await asyncio.sleep(_BACKOFF_SECONDS)
+                why = ("Audible is throttling this account" if _is_throttled(err)
+                       else f"{_MAX_CONSECUTIVE_FAILURES} downloads in a row failed")
+                last = f" (last error: {_summarize_error(err)[:120]})" if err else ""
+                _set_state("paused", until=(datetime.now(timezone.utc) + timedelta(seconds=_BACKOFF_SECONDS)).isoformat(),
+                           reason=why + last)
+                if await _wait_or_resume(_BACKOFF_SECONDS):
+                    logger.info("[queue] Pause ended early by an admin")
+                _set_state("idle")
                 continue
 
             delay = get_download_delay_seconds()
@@ -267,7 +307,10 @@ async def _download_worker() -> None:
                     more = db.query(Download).filter(Download.status == "queued").first()
                 if more:
                     logger.info("[queue] Waiting %ds before the next download", delay)
-                    await asyncio.sleep(delay)
+                    _set_state("waiting", until=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+                               reason="pause between downloads (Settings → Automation)")
+                    if await _wait_or_resume(delay):
+                        logger.info("[queue] Wait ended early by an admin")
 
         except asyncio.CancelledError:
             logger.info("[queue] Download worker stopping")
@@ -629,6 +672,41 @@ async def queue_download(
     # No task is spawned here. The single `_download_worker` picks this row up, so queueing N books
     # results in N queued rows and one active download — not N concurrent downloads.
     return dl
+
+
+def _stalled() -> bool:
+    """The worker has not checked in for a while although it should be polling every couple of seconds."""
+    if _QUEUE_STATE["state"] not in ("idle", "starting"):
+        return False
+    beat = _QUEUE_STATE.get("beat")
+    if not beat:
+        return True
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(beat)).total_seconds() > max(30, 10 * _QUEUE_POLL_SECONDS)
+
+
+@router.get("/queue/state")
+def queue_state(_=Depends(get_current_user)):
+    with SessionLocal() as db:
+        queued = db.query(Download).filter(Download.status == "queued").count()
+    st = _QUEUE_STATE["state"]
+    return {"state": "stalled" if queued and _stalled() else st, "book": _QUEUE_STATE["book"],
+            "until": _QUEUE_STATE["until"], "reason": _QUEUE_STATE["reason"], "queued": queued,
+            "paused_until": _QUEUE_STATE["until"] if st == "paused" else None}
+
+
+@router.post("/queue/resume")
+def queue_resume(current_user=Depends(get_current_user)):
+    """Admin override: end any wait now (pause after failures, gap between downloads); if the worker has died,
+    start a new one."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    was = _QUEUE_STATE["state"]
+    restarted = False
+    if _stalled():
+        ensure_worker()
+        restarted = True
+    _RESUME.set()
+    return {"resumed": was in ("paused", "waiting") or restarted, "was": was, "restarted_worker": restarted}
 
 
 @router.get("", response_model=list[DownloadResponse])

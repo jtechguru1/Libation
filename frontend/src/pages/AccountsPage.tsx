@@ -186,7 +186,12 @@ export function AccountsPage() {
         );
       }
     } catch (e: any) {
-      setError(errorText(e, "Failed to complete login. Make sure you pasted the correct URL."));
+      const msg = errorText(e, "Failed to complete login. Make sure you pasted the correct URL.");
+      if (reauthMode) {
+        endFlow(msg);              // the server has already put the old registration back
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -219,8 +224,8 @@ export function AccountsPage() {
    *  it's dropped from the list immediately, same as a manual remove. */
   const handleReauthenticate = async (accountId: string, accountLocale: string) => {
     const confirmed = window.confirm(
-      "This removes the account from Libation and registers it with Audible again as a new " +
-      "device. Your library and settings are kept. Continue?\n\n" +
+      "This registers the account with Audible again as a new device. Your library and settings are " +
+      "kept, and if the sign-in does not finish the account is put back as it was. Continue?\n\n" +
       'Use this if downloads fail with "Content License denied".'
     );
     if (!confirmed) return;
@@ -290,11 +295,18 @@ export function AccountsPage() {
     }
   };
 
-  const resetFlow = () => {
+  // `outcome` = the server already decided (e.g. refused a different Amazon customer and put the account back);
+  // without it the window was simply closed, so the server is asked to put the old registration back.
+  const endFlow = (outcome?: string) => {
     if (reauthMode && step !== "done") {
-      setReauthAbandoned(
-        `${email} was removed and not re-added — use Add Account to register it again.`
-      );
+      if (!outcome) {
+        api.post("/accounts/login/cancel", { session_id: sessionId })
+          .then(() => fetchAccounts())
+          .catch(() => {});
+      } else {
+        fetchAccounts();
+      }
+      setReauthAbandoned(outcome ?? `Re-authentication cancelled - ${email} was put back as it was.`);
     }
     setStep("idle");
     setEmail("");
@@ -305,6 +317,7 @@ export function AccountsPage() {
     setError("");
     setReauthMode(false);
   };
+  const resetFlow = () => endFlow();
 
   const canToggleAutoDownload = (acc: Account) =>
     user?.is_admin || acc.added_by_user_id === user?.id;
@@ -573,6 +586,13 @@ export function AccountsPage() {
                   Open the link below in your browser and sign in to Audible. After signing in,
                   copy the full URL from your browser's address bar and paste it in the next step.
                 </p>
+                {reauthMode && (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    Open the link in a <strong>private / incognito window</strong> and sign in as{" "}
+                    <strong>{email}</strong>. A normal window may already be signed in to a different Amazon account,
+                    and that sign-in would be refused.
+                  </p>
+                )}
                 <div className="flex gap-2">
                   <input
                     readOnly

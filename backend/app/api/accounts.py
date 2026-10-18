@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from .auth import get_current_user
 from ..database import get_db
 from ..models.user import User
+from ..services import reauth_guard
 from ..schemas.accounts import (
     AccountResponse, StartLoginRequest, StartLoginResponse,
     CompleteLoginRequest, MessageResponse,
@@ -29,6 +30,10 @@ class AccountAddedResponse(BaseModel):
 
 @router.get("", response_model=list[AccountResponse])
 async def get_accounts(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        reauth_guard.sweep(Path(settings.LIBATION_CONFIG), cli.live_login_sessions())
+    except Exception:
+        pass   # never let the safety net break the account list
     try:
         accounts = await cli.list_accounts()
         owners = {
@@ -105,12 +110,30 @@ async def login_complete(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    cfg = Path(settings.LIBATION_CONFIG)
+    reauth_id = reauth_guard.account_for_session(cfg, body.session_id)     # None for a plain "Add account"
     try:
         await cli.complete_login(body.session_id, body.response_url)
     except KeyError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        if reauth_id:
+            reauth_guard.restore(cfg, reauth_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=str(e) + ("; the account was put back as it was" if reauth_id else ""))
     except RuntimeError as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        if reauth_id:
+            reauth_guard.restore(cfg, reauth_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=str(e) + ("; the account was put back as it was" if reauth_id else ""))
+
+    if reauth_id:
+        old, new = reauth_guard.backed_up_entry(cfg, reauth_id), reauth_guard.find_entry(cfg, reauth_id)
+        if not reauth_guard.same_customer(old, new):
+            reauth_guard.restore(cfg, reauth_id)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=(
+                f"That sign-in belongs to a different Amazon account than the one {reauth_id} uses, so it was not "
+                "saved and the account was put back as it was. Sign out of Amazon (or open the link in a private / "
+                f"incognito window) and sign in as {reauth_id}."))
+        reauth_guard.drop(cfg, reauth_id)
 
     # Record which web UI user added this Audible account, and capture its id so the caller can
     # scan just this account rather than every account on the system.
@@ -225,16 +248,34 @@ async def reauthenticate_account(account_id: str, _=Depends(get_current_user)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     locale = match["locale"]
 
+    # keep the old registration until the new sign-in is proven to be the SAME Amazon customer
+    cfg = Path(settings.LIBATION_CONFIG)
+    old_entry = reauth_guard.find_entry(cfg, account_id)
+    if old_entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    reauth_guard.backup(cfg, account_id, old_entry)
     _remove_account_entry(account_id)
 
     try:
         result = await cli.start_login(account_id, locale)
     except RuntimeError as e:
+        reauth_guard.restore(cfg, account_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
-                f"The account was removed, but re-registration could not be started ({e}). "
-                'Re-add it via "Add account".'
-            ),
+            detail=f"Re-registration could not be started ({e}). Nothing was changed - the account is as it was.",
         )
+    reauth_guard.set_session(cfg, account_id, result["session_id"])
     return StartLoginResponse(**result)
+
+
+@router.post("/login/cancel", response_model=MessageResponse)
+async def cancel_login(body: dict, _=Depends(get_current_user)):
+    """The sign-in window was closed: a re-authentication puts the old registration back."""
+    cfg = Path(settings.LIBATION_CONFIG)
+    session_id = str(body.get("session_id") or "")
+    cli.abort_login(session_id)              # stop the login tool first, so it cannot write after the restore
+    account_id = reauth_guard.account_for_session(cfg, session_id)
+    if account_id and not reauth_guard.signed_in(reauth_guard.find_entry(cfg, account_id)):
+        reauth_guard.restore(cfg, account_id)
+        return MessageResponse(message=f"{account_id} was put back as it was")
+    return MessageResponse(message="Nothing to undo")
